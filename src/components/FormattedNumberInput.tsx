@@ -71,6 +71,8 @@ export const FormattedNumberInput: React.FC<FormattedNumberInputProps> = ({
         onChange={handleChange}
         placeholder={placeholder}
         className={`w-full text-left font-mono tracking-wider tabular-nums ${className}`}
+        // Reserve room on the left for the unit label so digits never run under it
+        style={unitLabel ? { paddingLeft: `${unitLabel.length * 0.55 + 1.75}rem` } : undefined}
       />
       {unitLabel && (
         <span className="absolute left-3 text-[11px] font-sans text-[#94A2C2] pointer-events-none select-none">

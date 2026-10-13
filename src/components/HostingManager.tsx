@@ -1,3 +1,4 @@
+import { JalaliDatePicker } from './JalaliDatePicker';
 import React, { useState, useMemo } from 'react';
 import { 
   Globe, 
@@ -671,13 +672,11 @@ export const HostingManager: React.FC<HostingManagerProps> = ({
                   <label className="block text-xs font-semibold text-[#94A2C2] mb-1">
                     تاریخ سررسید تمدید (شمسی) *
                   </label>
-                  <input
-                    type="text"
+                  <JalaliDatePicker
                     required
                     value={formRenewalDate}
-                    onChange={(e) => setFormRenewalDate(e.target.value)}
-                    placeholder="1404/05/15"
-                    className="w-full bg-[#0F1524] border border-[#1F2B47] rounded-xl px-4 py-2.5 text-xs text-white font-mono placeholder-[#5D6B8F] focus:outline-none focus:border-[#4F7CFF]"
+                    onChange={setFormRenewalDate}
+                    className="bg-[#0F1524] border border-[#1F2B47] rounded-xl px-4 py-2.5 text-xs"
                     style={{ backgroundColor: 'var(--ui-surface-subtle)', borderColor: 'var(--ui-border)' }}
                   />
                 </div>

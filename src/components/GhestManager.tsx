@@ -1,3 +1,5 @@
+import { JalaliDatePicker } from './JalaliDatePicker';
+import { getCurrentJalali } from '../utils/jalali';
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   CreditCard, 
@@ -111,7 +113,7 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
   const [formInstallmentAmount, setFormInstallmentAmount] = useState<number>(1850000);
   const [formDueDay, setFormDueDay] = useState<number>(10);
   const [formInterestRate, setFormInterestRate] = useState<number>(0);
-  const [formStartDate, setFormStartDate] = useState('1403/07/10');
+  const [formStartDate, setFormStartDate] = useState(() => getCurrentJalali().str);
   const [formNotes, setFormNotes] = useState('');
 
   // Loan Calculator State
@@ -189,7 +191,7 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
       setFormInstallmentAmount(loan.installmentAmount);
       setFormDueDay(loan.dueDay);
       setFormInterestRate(loan.interestRate || 0);
-      setFormStartDate(loan.startDate || '1403/07/10');
+      setFormStartDate(loan.startDate || getCurrentJalali().str);
       setFormNotes(loan.notes || '');
     } else {
       setEditingLoan(null);
@@ -198,9 +200,9 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
       setFormTotalAmount(20000000);
       setFormTotalInstallments(12);
       setFormInstallmentAmount(1850000);
-      setFormDueDay(10);
+      setFormDueDay(getCurrentJalali().jd);
       setFormInterestRate(0);
-      setFormStartDate('1403/07/10');
+      setFormStartDate(getCurrentJalali().str);
       setFormNotes('');
     }
     setIsAddModalOpen(true);
@@ -620,9 +622,9 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                       </div>
                       <div className="flex flex-wrap items-center gap-3 text-xs text-[#94A2C2] mt-1" style={{ color: 'var(--ui-text-secondary)' }}>
                         <span>طرف حساب: <strong className="text-white">{loan.lender}</strong></span>
-                        <span>•</span>
-                        <span>مبلغ هر قسط: <strong className="text-white">{LoanService.formatCurrency(loan.installmentAmount)}</strong></span>
-                        <span>•</span>
+                        <span className="hidden sm:inline">•</span>
+                        <span className="whitespace-nowrap">هر قسط: <strong className="text-white tabular-nums">{LoanService.formatCurrency(loan.installmentAmount)}</strong></span>
+                        <span className="hidden sm:inline">•</span>
                         <span>سررسید: هر ماه روز {LoanService.formatNumber(loan.dueDay)}</span>
                       </div>
                     </div>
@@ -630,9 +632,9 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
 
                   {/* Right Stats & Expand Toggle */}
                   <div className="flex items-center justify-between md:justify-end gap-3 pt-3 md:pt-0 border-t md:border-t-0 border-[#1F2B47]" style={{ borderColor: 'var(--ui-border)' }}>
-                    <div className="text-left md:text-right">
-                      <div className="text-xs text-[#94A2C2]" style={{ color: 'var(--ui-text-secondary)' }}>
-                        پیشرفت پرداخت: {LoanService.formatNumber(loan.paidInstallments || 0)} از {LoanService.formatNumber(loan.totalInstallments)} قسط
+                    <div className="text-right min-w-0">
+                      <div className="text-xs text-[#94A2C2] whitespace-nowrap" style={{ color: 'var(--ui-text-secondary)' }}>
+                        پیشرفت: {LoanService.formatNumber(loan.paidInstallments || 0)} از {LoanService.formatNumber(loan.totalInstallments)} قسط
                       </div>
                       <div className="flex items-center gap-2 mt-1">
                         <div className="w-24 sm:w-32 bg-[#1F2B47] h-2 rounded-full overflow-hidden">
@@ -647,7 +649,7 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         type="button"
                         onClick={() => handleOpenAddModal(loan)}
@@ -669,10 +671,10 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                       <button
                         type="button"
                         onClick={() => setExpandedLoanId(isExpanded ? null : loan.id)}
-                        className="py-1.5 px-3 rounded-xl bg-[#0F1524] hover:bg-[#182239] text-[#38E1FF] text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                        className="py-2 px-3 rounded-xl bg-[#0F1524] hover:bg-[#182239] text-[#38E1FF] text-xs font-bold transition flex items-center gap-1 cursor-pointer whitespace-nowrap"
                         style={{ backgroundColor: 'var(--ui-surface-subtle)' }}
                       >
-                        <span>{isExpanded ? 'بستن لیست' : 'مشاهده اقساط'}</span>
+                        <span>{isExpanded ? 'بستن' : 'اقساط'}</span>
                         {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                       </button>
                     </div>
@@ -687,8 +689,8 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                         <Calendar className="w-4 h-4 text-[#4F7CFF]" />
                         <span>جدول سررسید اقساط ماهانه ({loan.totalInstallments} قسط):</span>
                       </div>
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-1 bg-[#070A12] p-1 rounded-xl border border-[#1F2B47]">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1 bg-[#070A12] p-1 rounded-xl border border-[#1F2B47] shrink-0">
                           <button
                             type="button"
                             onClick={() => setAmortizationViewMode('table')}
@@ -696,7 +698,7 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                               amortizationViewMode === 'table' ? 'bg-[#4F7CFF] text-white' : 'text-[#94A2C2] hover:text-white'
                             }`}
                           >
-                            نمای جدول استهلاک
+                            جدول اقساط
                           </button>
                           <button
                             type="button"
@@ -708,7 +710,7 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                             نمای کارتی
                           </button>
                         </div>
-                        <span className="text-[#94A2C2]">باقی‌مانده: {LoanService.formatCurrency(remainingCount * loan.installmentAmount)}</span>
+                        <span className="text-[#94A2C2] whitespace-nowrap">باقی‌مانده: <strong className="text-white tabular-nums">{LoanService.formatCurrency(remainingCount * loan.installmentAmount)}</strong></span>
                       </div>
                     </div>
 
@@ -721,7 +723,45 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
 
                     {/* View 1: Detailed Table View */}
                     {amortizationViewMode === 'table' ? (
-                      <div className="overflow-x-auto rounded-2xl border border-[#1F2B47] bg-[#070A12]/60">
+                      <>
+                      {/* Mobile: compact rows that always fit the screen */}
+                      <div className="sm:hidden rounded-2xl border border-[#1F2B47] bg-[#070A12]/60 divide-y divide-[#1F2B47]/50 overflow-hidden" style={{ borderColor: 'var(--ui-border)' }}>
+                        {(loan.installments || []).map((inst) => (
+                          <div key={inst.number} className={`flex items-center gap-3 px-3 py-2.5 ${inst.isPaid ? 'bg-emerald-500/[0.04]' : ''}`}>
+                            <span className={`w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold tabular-nums shrink-0 ${
+                              inst.isPaid ? 'bg-emerald-500/15 text-emerald-300' : 'bg-white/5 text-white'
+                            }`}>
+                              {inst.number}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[13px] font-bold text-white tabular-nums whitespace-nowrap">
+                                {LoanService.formatCurrency(inst.amount)}
+                              </div>
+                              <div className="flex items-center gap-1.5 text-[11px] mt-0.5 whitespace-nowrap">
+                                <span className="font-mono text-[#38E1FF] tabular-nums">{inst.dueDate}</span>
+                                <span className={`px-1.5 py-px rounded-full text-[10px] font-bold ${
+                                  inst.isPaid ? 'text-emerald-400 bg-emerald-500/10' : 'text-amber-300 bg-amber-500/10'
+                                }`}>
+                                  {inst.isPaid ? 'پرداخت شده' : 'در انتظار'}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleOrPay(loan.id, inst)}
+                              className={`shrink-0 py-1.5 px-3 rounded-xl text-[11px] font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap ${
+                                inst.isPaid
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-[#4F7CFF] text-white'
+                              }`}
+                            >
+                              {inst.isPaid ? <Check className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />}
+                              <span>{inst.isPaid ? 'لغو' : 'پرداخت'}</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="hidden sm:block overflow-x-auto rounded-2xl border border-[#1F2B47] bg-[#070A12]/60">
                         <table className="w-full text-right text-xs">
                           <thead>
                             <tr className="border-b border-[#1F2B47] text-[#94A2C2] bg-white/[0.02]">
@@ -752,11 +792,11 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                                 </td>
                                 <td className="py-2.5 px-3 font-sans">
                                   {inst.isPaid ? (
-                                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                                    <span className="whitespace-nowrap text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
                                       پرداخت شده {inst.trackingCode ? `(${inst.trackingCode})` : ''}
                                     </span>
                                   ) : (
-                                    <span className="text-[10px] text-amber-300 font-bold bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                                    <span className="whitespace-nowrap text-[10px] text-amber-300 font-bold bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
                                       در انتظار
                                     </span>
                                   )}
@@ -798,6 +838,7 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                           </tbody>
                         </table>
                       </div>
+                      </>
                     ) : (
                       /* View 2: Cards Grid View */
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
@@ -998,12 +1039,15 @@ export const GhestManager: React.FC<GhestManagerProps> = ({
                   <label className="block text-xs font-semibold text-[#94A2C2] mb-1">
                     تاریخ شروع اولین قسط
                   </label>
-                  <input
-                    type="text"
+                  <JalaliDatePicker
                     value={formStartDate}
-                    onChange={(e) => setFormStartDate(e.target.value)}
-                    placeholder="مثال: 1403/07/10"
-                    className="w-full bg-[#0F1524] border border-[#1F2B47] rounded-xl px-4 py-2.5 text-xs text-white placeholder-[#5D6B8F] focus:outline-none focus:border-[#4F7CFF]"
+                    onChange={(v) => {
+                      setFormStartDate(v);
+                      // Due day follows the first installment's day of month
+                      const d = parseInt(v.split('/')[2], 10);
+                      if (d >= 1 && d <= 31) setFormDueDay(d);
+                    }}
+                    className="bg-[#0F1524] border border-[#1F2B47] rounded-xl px-4 py-2.5 text-xs"
                   />
                 </div>
 

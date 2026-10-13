@@ -26,6 +26,7 @@ import { BiometricKeyStore } from '../services/biometricKeyStore';
 import { StorageService } from '../services/storage';
 import { IOSAutoFillService } from '../services/iosAutofill';
 import { IOSAutoFillModal } from './IOSAutoFillModal';
+import { AppVersionFooter } from './AppVersionFooter';
 
 interface LockScreenProps {
   onUnlocked: (user: UserProfile, key: CryptoKey) => void;
@@ -919,6 +920,8 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
             سازگار با آیفون
           </span>
         </div>
+
+        <AppVersionFooter className="mt-4" />
       </div>
 
       {/* iOS AutoFill Visual Guide Modal */}

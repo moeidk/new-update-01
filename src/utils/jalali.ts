@@ -42,9 +42,10 @@ export function isJalaliLeapYear(jy: number): boolean {
   }
   let n = jy - jp;
   if (jump - n < 6) n = n - jump + (Math.floor((jump + 4) / 33) * 33);
-  let leap = ((n + 1) % 33) - 1;
+  // Same rule as jalaali-js: leap when mod(mod(n + 1, 33) - 1, 4) === 0
+  let leap = (((n + 1) % 33) - 1) % 4;
   if (leap === -1) leap = 4;
-  return (leap % 4 === 0 && leap !== 0);
+  return leap === 0;
 }
 
 export function getJalaliMonthDays(jy: number, jm: number): number {
@@ -72,37 +73,40 @@ export function gregorianToJalali(gy: number, gm: number, gd: number): { jy: num
 }
 
 export function jalaliToGregorian(jy: number, jm: number, jd: number): Date {
-  let sal_a = [0, 31, 62, 93, 124, 155, 186, 216, 246, 276, 306, 336];
-  let d_4 = (jy + 38) % 4;
-  let days = 1029983 + (365 * jy) + Math.floor((jy + 38) / 4) + sal_a[jm - 1] + jd;
-  let gy = 1600 + 400 * Math.floor(days / 146097);
+  // Standard Jalali → Gregorian conversion (inverse of gregorianToJalali above).
+  // The previous implementation returned dates around the year 5825, which broke weekdays
+  // in the calendar and any date arithmetic built on it.
+  const jy2 = jy + 1595;
+  let days =
+    -355668 +
+    365 * jy2 +
+    Math.floor(jy2 / 33) * 8 +
+    Math.floor(((jy2 % 33) + 3) / 4) +
+    jd +
+    (jm < 7 ? (jm - 1) * 31 : (jm - 7) * 30 + 186);
+  let gy = 400 * Math.floor(days / 146097);
   days %= 146097;
-  let leap = true;
-  if (days >= 36525) {
+  if (days > 36524) {
     days--;
     gy += 100 * Math.floor(days / 36524);
     days %= 36524;
     if (days >= 365) days++;
-    else leap = false;
   }
   gy += 4 * Math.floor(days / 1461);
   days %= 1461;
-  if (days >= 366) {
-    leap = false;
-    days--;
-    gy += Math.floor(days / 365);
-    days %= 365;
+  if (days > 365) {
+    gy += Math.floor((days - 1) / 365);
+    days = (days - 1) % 365;
   }
-  let mon = 0;
-  const g_d_m = [0, 31, (leap ? 29 : 28), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  for (let i = 1; i <= 12; i++) {
-    if (days < g_d_m[i]) {
-      mon = i;
-      break;
-    }
-    days -= g_d_m[i];
+  let gd = days + 1;
+  const isLeap = (gy % 4 === 0 && gy % 100 !== 0) || gy % 400 === 0;
+  const monthDays = [31, isLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  let gm = 0;
+  while (gm < 12 && gd > monthDays[gm]) {
+    gd -= monthDays[gm];
+    gm++;
   }
-  return new Date(gy, mon - 1, days + 1);
+  return new Date(gy, gm, gd);
 }
 
 /**

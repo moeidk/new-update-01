@@ -42,6 +42,7 @@ import { IOSInstallGuideModal } from './components/IOSInstallGuideModal';
 import { IOSAutoFillModal } from './components/IOSAutoFillModal';
 import { DataMigrationService } from './services/dataMigration';
 import { UpdateBanner } from './components/UpdateBanner';
+import { AppVersionFooter } from './components/AppVersionFooter';
 
 import { 
   Menu, 
@@ -571,6 +572,8 @@ export default function App() {
               onResetVault={handleResetVault}
             />
           )}
+
+          <AppVersionFooter className="mt-10 pt-4 border-t border-[#1F2B47]/50" />
         </main>
 
         {/* Mobile Bottom Navigation Bar (Docked to iOS Home Indicator with Safe Area) */}

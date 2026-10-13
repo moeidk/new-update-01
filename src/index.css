@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+:root {
+  --ui-bg: #0B0F1A;
+  --ui-surface: #121A2C;
+  --ui-surface-subtle: #0F1524;
+  --ui-surface-hover: #182239;
+  --ui-border: #1F2B47;
+  --ui-border-strong: #2C3C61;
+  --ui-text: #E7EDFA;
+  --ui-text-secondary: #94A2C2;
+  --ui-text-muted: #5D6B8F;
+  --ui-accent: #4F7CFF;
+  --ui-accent-purple: #8A5CFF;
+  --ui-accent-cyan: #38E1FF;
+}
+
+[data-theme="light"] {
+  --ui-bg: #F4F6FB;
+  --ui-surface: #FFFFFF;
+  --ui-surface-subtle: #F7F9FE;
+  --ui-surface-hover: #EEF2F9;
+  --ui-border: #E0E6F0;
+  --ui-border-strong: #C9D3E3;
+  --ui-text: #172033;
+  --ui-text-secondary: #52617A;
+  --ui-text-muted: #748198;
+  --ui-accent: #315FEA;
+  --ui-accent-purple: #7650D6;
+  --ui-accent-cyan: #0EA5E9;
+}
+
+/* iOS Safe Area & PWA Standalone Optimization */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+html, body {
+  min-height: 100%;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+#root {
+  min-height: 100%;
+  height: 100dvh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* iOS Safe Area Utilities */
+.safe-area-top {
+  padding-top: max(env(safe-area-inset-top, 0px), 0.75rem);
+}
+.safe-area-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.75rem);
+}
+.safe-area-inset-x {
+  padding-left: max(env(safe-area-inset-left, 0px), 0.5rem);
+  padding-right: max(env(safe-area-inset-right, 0px), 0.5rem);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ui-border);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ui-border-strong);
+}
+
+/* Number input spinners hide */
+input[type=number]::-webkit-inner-spin-button, 
+input[type=number]::-webkit-outer-spin-button { 
+  -webkit-appearance: none; 
+  margin: 0; 
+}
+
+/* English Numerals & Fintech Numbers Formatting */
+body {
+  font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: "numr" 0, "ss01" 0, "ss02" 0;
+}
+
+.font-mono,
+.tabular-nums,
+input[type="text"],
+input[type="number"],
+.number-en {
+  font-family: 'Plus Jakarta Sans', 'Vazirmatn', -apple-system, BlinkMacSystemFont, monospace;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}

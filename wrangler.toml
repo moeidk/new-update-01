@@ -1,0 +1,15 @@
+name = "keeppass-vault"
+compatibility_date = "2024-11-01"
+
+# پیکربندی استقرار فایل‌های استاتیک فرانت‌اند بر روی Cloudflare Workers
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"
+
+# محیط تستی (Staging / Preview)
+[env.staging]
+name = "keeppass-vault-staging"
+
+# محیط عملیاتی اصلی (Production)
+[env.production]
+name = "keeppass-vault"

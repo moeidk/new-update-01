@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      (function() {
+        if (typeof window === 'undefined') return;
+        var NativeWebSocket = window.WebSocket;
+        if (!NativeWebSocket) return;
+
+        class FakeHmrSocket extends EventTarget {
+          static CONNECTING = 0;
+          static OPEN = 1;
+          static CLOSING = 2;
+          static CLOSED = 3;
+          CONNECTING = 0;
+          OPEN = 1;
+          CLOSING = 2;
+          CLOSED = 3;
+          readyState = 1;
+          url = '';
+          protocol = 'vite-hmr';
+          extensions = '';
+          binaryType = 'blob';
+          bufferedAmount = 0;
+          constructor(url) {
+            super();
+            this.url = String(url);
+            setTimeout(() => {
+              this.dispatchEvent(new Event('open'));
+            }, 0);
+          }
+          send() {}
+          close() {
+            this.readyState = 3;
+            this.dispatchEvent(new Event('close'));
+          }
+        }
+
+        window.WebSocket = function(url, protocols) {
+          if (protocols === 'vite-hmr' || (Array.isArray(protocols) && protocols.includes('vite-hmr')) || (typeof url === 'string' && (url.includes('token=') || url.includes('/@vite/')))) {
+            return new FakeHmrSocket(url);
+          }
+          return new NativeWebSocket(url, protocols);
+        };
+        window.WebSocket.CONNECTING = 0;
+        window.WebSocket.OPEN = 1;
+        window.WebSocket.CLOSING = 2;
+        window.WebSocket.CLOSED = 3;
+        window.WebSocket.prototype = NativeWebSocket.prototype;
+
+        window.addEventListener('unhandledrejection', function(e) {
+          var msg = (e.reason && (e.reason.message || e.reason.stack || '')) || '';
+          if (msg.includes('WebSocket') || msg.includes('@vite/client') || msg.includes('createWebSocketModuleRunnerTransport')) {
+            e.preventDefault();
+          }
+        });
+        window.addEventListener('error', function(e) {
+          var msg = (e.message || '') + ' ' + (e.filename || '');
+          if (msg.includes('WebSocket') || msg.includes('@vite/client') || msg.includes('createWebSocketModuleRunnerTransport')) {
+            e.preventDefault();
+          }
+        });
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>KeepPass & Ghest | سامانه هوشمند مدیریت اقساط و گاوصندوق امن</title>
+    <meta name="description" content="سامانه یکپارچه مدیریت اقساط و وام‌های بانکی، گاهشمار سررسید، گزارش‌های مالی تحلیلی و گاوصندوق رمزنگاری‌شده رمزها" />
+    
+    <!-- Open Graph / Social Sharing -->
+    <meta property="og:title" content="KeepPass & Ghest | سامانه هوشمند مدیریت اقساط و گاوصندوق امن" />
+    <meta property="og:description" content="سامانه یکپارچه مدیریت اقساط و وام‌های بانکی، گاهشمار سررسید، گزارش‌های مالی تحلیلی و گاوصندوق رمزنگاری‌شده رمزها" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- PWA & Mobile Web App Meta Tags -->
+    <meta name="theme-color" content="#0B0F1A" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="KeepPass" />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- Typography (Vazirmatn & Plus Jakarta Sans for English Financial Numerals) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  </head>
+  <body class="bg-[#0B0F1A] text-[#E7EDFA] font-['Vazirmatn',system-ui,sans-serif] antialiased selection:bg-[#4F7CFF]/30 selection:text-white min-h-screen">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

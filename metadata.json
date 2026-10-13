@@ -1,0 +1,6 @@
+{
+  "name": "KeepPass Vault",
+  "description": "گاوصندوق امن مدیریت رمزها با ورود بیومتریک فیس‌آیدی، اثر انگشت، رمز عبور و پشتیبانی نصب روی آیفون (PWA)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

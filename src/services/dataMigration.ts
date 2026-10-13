@@ -41,7 +41,11 @@ export class DataMigrationService {
     const snapshot: Record<string, string> = {};
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (key && (key.startsWith('keeppass_') || key.startsWith('ghest_') || key.startsWith('hosting_'))) {
+      if (
+        key &&
+        !key.startsWith('keeppass_bio_token_') && // never copy (legacy) raw keys into snapshots
+        (key.startsWith('keeppass_') || key.startsWith('ghest_') || key.startsWith('hosting_'))
+      ) {
         snapshot[key] = localStorage.getItem(key) || '';
       }
     }

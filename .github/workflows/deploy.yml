@@ -1,167 +1,149 @@
-name: CI/CD Multi-Stage Deployment (Staging & Production)
+name: Build & Deploy (Cloudflare Workers)
+
+# Fully automatic:
+#   git push to main          → tests → build → deploy to PRODUCTION
+#   git push to any branch    → tests → build → deploy to STAGING (preview)
+#   pull request              → tests + build only
+# Open apps notice the new version within ~1 minute and show the "new version" banner.
 
 on:
   push:
-    branches:
-      - main
-      - '**' # All branches trigger preview
+    branches: ['**']
+  pull_request:
   workflow_dispatch:
     inputs:
       target_environment:
-        description: 'محیط استقرار هدف (staging یا production)'
+        description: 'محیط استقرار (staging یا production)'
         required: true
         default: 'production'
         type: choice
         options:
           - production
           - staging
-      reason:
-        description: 'دلیل یا توضیحات انتشار نسخه'
-        required: false
-        default: 'انتشار نسخه جدید با تایید مدیر از پنل'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
-  # =========================================================================
-  # گام ۱: تست، اعتبارسنجی تایپ‌اسکریپت و تولید خروجی بیلد
-  # =========================================================================
-  test_and_build:
-    name: تست و کامپایل بیلد
+  build:
+    name: تست و بیلد
     runs-on: ubuntu-latest
+    outputs:
+      deploy_env: ${{ steps.target.outputs.env }}
     steps:
-      - name: دریافت کد منبع (Checkout)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20 # recent commit messages become the in-app changelog
 
-      - name: راه‌اندازی Node.js
-        uses: actions/setup-node@v4
+      - name: تعیین محیط استقرار
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "env=${{ github.event.inputs.target_environment }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "env=production" >> "$GITHUB_OUTPUT"
+          else
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+          cache: npm
 
       - name: نصب وابستگی‌ها
         run: npm ci --legacy-peer-deps
 
-      - name: بررسی خطاهای تایپ‌اسکریپت (Lint & TypeCheck)
+      - name: بررسی تایپ‌اسکریپت (فرانت‌اند + Worker)
         run: npm run lint
 
-      - name: اجرای فرآیند بیلد و تولید version.json
+      - name: بیلد و تولید version.json
         run: npm run build
         env:
           NODE_ENV: production
-          VITE_ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME || 'admin' }}
+          DEPLOY_ENV: ${{ steps.target.outputs.env }}
 
-      - name: آرشیو خروجی بیلد برای مراحل استقرار
-        uses: actions/upload-artifact@v4
+      - name: آزمایش بسته‌بندی Worker (بدون انتشار)
+        run: npx wrangler deploy --env="" --dry-run --outdir .wrangler-dry-run
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: dist-artifacts
+          name: dist
           path: dist/
           retention-days: 7
 
-  # =========================================================================
-  # گام ۲: استقرار خودکار برنچ‌های تستی روی محیط Staging / Preview
-  # =========================================================================
-  deploy_staging:
-    name: استقرار در محیط پیش‌نمایش (Staging / Preview)
-    needs: test_and_build
-    if: github.ref != 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.target_environment == 'staging')
+  deploy:
+    name: استقرار روی Cloudflare (${{ needs.build.outputs.deploy_env }})
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
-      name: staging
-      url: ${{ steps.cloudflare_staging.outputs.deployment-url }}
+      name: ${{ needs.build.outputs.deploy_env }}
+      url: ${{ steps.deploy.outputs.url }}
+    concurrency:
+      group: deploy-${{ needs.build.outputs.deploy_env }}
+      cancel-in-progress: false
+    env:
+      DEPLOY_ENV: ${{ needs.build.outputs.deploy_env }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: دریافت کد منبع
-        uses: actions/checkout@v4
-
-      - name: دانلود خروجی بیلد
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-artifacts
-          path: dist
-
-      - name: بررسی وجود سکرت‌های Cloudflare
-        id: check_cf_token
+      - name: بررسی وجود توکن Cloudflare
+        id: token
         run: |
-          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
-            echo "has_token=false" >> $GITHUB_OUTPUT
-            echo "::warning::سکرت CLOUDFLARE_API_TOKEN در مخزن تنظیم نشده است. استقرار روی Cloudflare رد (Skip) شد تا وضعیت بررسی موفق بماند."
-            echo "### ⚠️ سکرت CLOUDFLARE_API_TOKEN تنظیم نشده است" >> $GITHUB_STEP_SUMMARY
-            echo "مراحل تست، اعتبارسنجی و بیلد با موفقیت کامل انجام شدند ✅" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "برای اینکه دیپلوی روی Cloudflare Workers انجام شود، لطفاً در گیت‌هاب به مسیر زیر بروید و توکن را وارد کنید:" >> $GITHUB_STEP_SUMMARY
-            echo "**Settings > Secrets and variables > Actions > New repository secret**" >> $GITHUB_STEP_SUMMARY
-            echo "- نام: \`CLOUDFLARE_API_TOKEN\`" >> $GITHUB_STEP_SUMMARY
-            echo "- نام اختیاری: \`CLOUDFLARE_ACCOUNT_ID\`" >> $GITHUB_STEP_SUMMARY
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⚠️ سکرت CLOUDFLARE_API_TOKEN تنظیم نشده است"
+              echo "بیلد و تست‌ها موفق بودند ✅ ولی استقرار انجام نشد."
+              echo ""
+              echo "مسیر: **Settings › Secrets and variables › Actions › New repository secret**"
+              echo "- نام: \`CLOUDFLARE_API_TOKEN\` (قالب «Edit Cloudflare Workers» در داشبورد Cloudflare)"
+              echo "- اختیاری: \`CLOUDFLARE_ACCOUNT_ID\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$DEPLOY_ENV" = "production" ]; then
+              echo "::error::CLOUDFLARE_API_TOKEN is missing — production was NOT deployed."
+              exit 1
+            fi
+            echo "::warning::CLOUDFLARE_API_TOKEN is missing — staging deploy skipped."
           else
-            echo "has_token=true" >> $GITHUB_OUTPUT
+            echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: استقرار در Cloudflare Workers (Staging Preview)
-        id: cloudflare_staging
-        if: steps.check_cf_token.outputs.has_token == 'true'
-        uses: cloudflare/wrangler-action@v3
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.present == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.token.outputs.present == 'true'
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env staging
+          node-version: 22
+          cache: npm
 
-      - name: ثبت گزارش محیط پیش‌نمایش در خلاصه گیت‌هاب
-        if: steps.check_cf_token.outputs.has_token == 'true'
-        run: |
-          echo "### 🚀 محیط پیش‌نمایش با موفقیت مستقر شد" >> $GITHUB_STEP_SUMMARY
-          echo "آدرس تست: ${{ steps.cloudflare_staging.outputs.deployment-url }}" >> $GITHUB_STEP_SUMMARY
-          echo "برنچ: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+      - name: نصب wrangler
+        if: steps.token.outputs.present == 'true'
+        run: npm ci --legacy-peer-deps
 
-  # =========================================================================
-  # گام ۳: استقرار در محیط اصلی (Production) - نیازمند تایید مدیر در GitHub
-  # =========================================================================
-  deploy_production:
-    name: استقرار در سایت اصلی (Production)
-    needs: test_and_build
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'production')
-    runs-on: ubuntu-latest
-    environment:
-      name: production # این محیط در تنظیمات GitHub دارای Required Reviewers است
-      url: ${{ steps.cloudflare_prod.outputs.deployment-url }}
-    steps:
-      - name: دریافت کد منبع
-        uses: actions/checkout@v4
-
-      - name: دانلود خروجی بیلد
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
+        if: steps.token.outputs.present == 'true'
         with:
-          name: dist-artifacts
+          name: dist
           path: dist
 
-      - name: بررسی سلامت داده‌ها قبل از دیپلوی (Pre-Deploy Backup Check)
+      - name: آماده‌سازی فضای ذخیره ابری (KV)
+        if: steps.token.outputs.present == 'true'
+        run: node scripts/ensure-kv.mjs "$DEPLOY_ENV"
+
+      - name: استقرار (Zero Downtime)
+        id: deploy
+        if: steps.token.outputs.present == 'true'
+        shell: bash # -eo pipefail: a failed deploy fails the job
         run: |
-          echo "بررسی وجود فایل متادیتای نسخه در خروجی..."
-          test -f dist/version.json || (echo "خطا: فایل version.json یافت نشد!" && exit 1)
-          cat dist/version.json
-
-      - name: بررسی وجود سکرت‌های Cloudflare (Production)
-        id: check_cf_token_prod
-        run: |
-          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
-            echo "::error::سکرت CLOUDFLARE_API_TOKEN در مخزن تنظیم نشده است! برای استقرار در Production این مقدار الزامی است."
-            echo "### ❌ خطا: سکرت CLOUDFLARE_API_TOKEN یافت نشد" >> $GITHUB_STEP_SUMMARY
-            echo "برای استقرار در Production، حتماً مقدار \`CLOUDFLARE_API_TOKEN\` را در **Settings > Secrets and variables > Actions** اضافه کنید." >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-      - name: استقرار در Cloudflare Workers (Production)
-        id: cloudflare_prod
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env production
-
-      - name: ثبت گزارش استقرار موفق در خلاصه گیت‌هاب
-        run: |
-          echo "### ✅ نسخه نهایی با موفقیت در Production مستقر شد" >> $GITHUB_STEP_SUMMARY
-          echo "دامنه اصلی: ${{ steps.cloudflare_prod.outputs.deployment-url }}" >> $GITHUB_STEP_SUMMARY
-          echo "زمان استقرار: $(date)" >> $GITHUB_STEP_SUMMARY
-
+          npx wrangler deploy --env "$DEPLOY_ENV" 2>&1 | tee deploy.log
+          URL=$(grep -Eo 'https://[a-zA-Z0-9._-]+\.workers\.dev' deploy.log | head -n1 || true)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ✅ نسخه جدید روی ${DEPLOY_ENV} منتشر شد"
+            echo "- آدرس: ${URL:-'(دامنه سفارشی)'}"
+            echo "- کامیت: \`${GITHUB_SHA::7}\` روی برنچ \`${GITHUB_REF_NAME}\`"
+            echo "- کاربرانی که برنامه باز است ظرف حدود یک دقیقه پیام «نسخه جدید» را می‌بینند."
+          } >> "$GITHUB_STEP_SUMMARY"

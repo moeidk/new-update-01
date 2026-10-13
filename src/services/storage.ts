@@ -1,8 +1,13 @@
 /**
  * Storage & Vault Persistence Service with Multi-User Isolation
  */
-import { VaultItem, SecuritySettings, BackupData, UserProfile, LoanItem } from '../types';
-import { CryptoService } from './crypto';
+import { VaultItem, SecuritySettings, UserProfile, LoanItem } from '../types';
+import { CryptoService, KDF_ITERATIONS } from './crypto';
+import { SecureStore, secureKeysFor, scrubSnapshots } from './secureStore';
+import { BiometricKeyStore } from './biometricKeyStore';
+
+/** localStorage prefix where older versions stored the RAW vault key (insecure, now removed). */
+const LEGACY_BIO_TOKEN_PREFIX = 'keeppass_bio_token_';
 
 const USERS_REGISTRY_KEY = 'keeppass_users_registry_v2';
 const ACTIVE_USER_KEY = 'keeppass_active_username_v2';
@@ -137,7 +142,9 @@ export class StorageService {
     passwordHash: string,
     salt: string,
     biometricEnabled: boolean = false,
-    biometricCredentialId?: string
+    biometricCredentialId?: string,
+    kdfIterations: number = KDF_ITERATIONS,
+    biometricKeyMode?: 'prf' | 'device'
   ): Promise<UserProfile> {
     const cleanUsername = username.trim().toLowerCase();
     const existing = this.getUserByUsername(cleanUsername);
@@ -149,8 +156,10 @@ export class StorageService {
       isSetup: true,
       masterPasswordHash: passwordHash,
       salt,
+      kdfIterations,
       biometricEnabled,
       biometricCredentialId,
+      biometricKeyMode,
       biometricType: 'none',
       autoBiometricPrompt: false,
       autoLockMinutes: 5,
@@ -243,18 +252,10 @@ export class StorageService {
   }
 
   /**
-   * Per-user loans key
-   */
-  private static getLoansKey(username: string): string {
-    return `keeppass_loans_user_${username.trim().toLowerCase()}`;
-  }
-
-  /**
-   * Retrieves isolated loans for a specific user
+   * Retrieves isolated loans for a specific user (decrypted in memory while unlocked)
    */
   static getLoansForUser(username: string): LoanItem[] {
-    const key = this.getLoansKey(username);
-    const raw = localStorage.getItem(key);
+    const raw = SecureStore.getItem(secureKeysFor(username).loans);
     if (!raw) {
       return [];
     }
@@ -277,39 +278,87 @@ export class StorageService {
   }
 
   /**
-   * Saves isolated loans for a specific user
+   * Saves isolated loans for a specific user (encrypted at rest)
    */
   static saveLoansForUser(username: string, loans: LoanItem[]): void {
-    const key = this.getLoansKey(username);
-    localStorage.setItem(key, JSON.stringify(loans));
+    SecureStore.setItem(secureKeysFor(username).loans, JSON.stringify(loans));
   }
 
-  /**
-   * Caches raw master key in local storage wrapped for biometric unlock of a specific user
-   */
-  static async cacheKeyForBiometrics(username: string, key: CryptoKey): Promise<void> {
-    const rawBase64 = await CryptoService.exportKeyRaw(key);
-    localStorage.setItem(`keeppass_bio_token_${username.trim().toLowerCase()}`, rawBase64);
-  }
+  // =========================================================================
+  // Unlock / session helpers
+  // =========================================================================
 
   /**
-   * Retrieves cached master key for biometric unlock
+   * Verifies the master password for a stored user. Legacy accounts (fast SHA-256 hash) are
+   * transparently upgraded to the key-derived verifier.
    */
-  static async getCachedKeyForBiometrics(username: string): Promise<CryptoKey | null> {
-    const rawBase64 = localStorage.getItem(`keeppass_bio_token_${username.trim().toLowerCase()}`);
-    if (!rawBase64) return null;
-    try {
-      return await CryptoService.importKeyRaw(rawBase64);
-    } catch {
-      return null;
+  static async unlockWithPassword(
+    user: UserProfile,
+    password: string
+  ): Promise<{ ok: boolean; key?: CryptoKey; user?: UserProfile }> {
+    const res = await CryptoService.verifyMasterPassword(password, user.settings);
+    if (!res.ok || !res.key) return { ok: false };
+
+    let updatedUser = user;
+    if (res.upgradedVerifier) {
+      const settings: SecuritySettings = {
+        ...user.settings,
+        masterPasswordHash: res.upgradedVerifier,
+        kdfIterations: CryptoService.iterationsFor(user.settings),
+      };
+      this.saveUserSettings(user.username, settings);
+      updatedUser = { ...user, settings };
     }
+    return { ok: true, key: res.key, user: updatedUser };
+  }
+
+  /** Opens the encrypted per-user stores. Must run before reading loans/hosting/Telegram data. */
+  static async openSession(username: string, key: CryptoKey): Promise<void> {
+    await SecureStore.open(username, key);
+  }
+
+  /** Clears decrypted data from memory. */
+  static closeSession(): void {
+    SecureStore.close();
   }
 
   /**
-   * Clears biometric key cache for a user
+   * Removes raw vault keys written by older versions (`keeppass_bio_token_*`),
+   * including copies inside migration snapshots. Returns the affected usernames.
    */
-  static clearBiometricKeyCache(username: string): void {
-    localStorage.removeItem(`keeppass_bio_token_${username.trim().toLowerCase()}`);
+  static purgeLegacyBiometricTokens(): string[] {
+    const affected: string[] = [];
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(LEGACY_BIO_TOKEN_PREFIX)) {
+        toRemove.push(k);
+        affected.push(k.slice(LEGACY_BIO_TOKEN_PREFIX.length));
+      }
+    }
+    toRemove.forEach((k) => localStorage.removeItem(k));
+    scrubSnapshots((k) => k.startsWith(LEGACY_BIO_TOKEN_PREFIX));
+    return affected;
+  }
+
+  /**
+   * After a password login: if biometric unlock is enabled but this device has no wrapped key
+   * (e.g. right after the security update removed the old raw key), store one in device mode
+   * without an extra prompt so Face ID keeps working.
+   */
+  static async ensureBiometricKey(user: UserProfile, key: CryptoKey): Promise<UserProfile> {
+    const s = user.settings;
+    if (!s.biometricEnabled || !s.biometricCredentialId) return user;
+    if (await BiometricKeyStore.has(user.username)) return user;
+    try {
+      const mode = await BiometricKeyStore.wrapForCredential(user.username, s.biometricCredentialId, key, { tryPrf: false });
+      const settings = { ...s, biometricKeyMode: mode };
+      this.saveUserSettings(user.username, settings);
+      return { ...user, settings };
+    } catch (err) {
+      console.warn('[StorageService] Could not restore biometric key:', err);
+      return user;
+    }
   }
 
   /**
@@ -324,46 +373,6 @@ export class StorageService {
   static setTheme(theme: 'dark' | 'light'): void {
     localStorage.setItem(THEME_KEY, theme);
     document.documentElement.setAttribute('data-theme', theme);
-  }
-
-  /**
-   * Export encrypted backup for a user
-   */
-  static async exportBackup(items: VaultItem[], masterPassword?: string): Promise<string> {
-    const backup: BackupData = {
-      version: 2,
-      timestamp: new Date().toISOString(),
-      items,
-    };
-    const json = JSON.stringify(backup, null, 2);
-
-    if (masterPassword) {
-      const salt = CryptoService.generateSalt();
-      const key = await CryptoService.deriveKey(masterPassword, salt);
-      const encrypted = await CryptoService.encrypt(json, key);
-      return JSON.stringify({
-        isEncrypted: true,
-        salt,
-        data: encrypted,
-        timestamp: backup.timestamp,
-      });
-    }
-
-    return json;
-  }
-
-  /**
-   * Initial sample items for user convenience upon first vault creation (Clean empty)
-   */
-  static getInitialSampleItems(_username?: string): VaultItem[] {
-    return [];
-  }
-
-  /**
-   * Initial sample loans for user (Clean empty)
-   */
-  static getInitialLoans(_username?: string): LoanItem[] {
-    return [];
   }
 
   // =========================================================================
@@ -421,13 +430,23 @@ export class StorageService {
   /**
    * بررسی وجود نسخه پشتیبان ابری برای یک نام کاربری
    */
-  static async checkCloudBackupAvailable(username: string): Promise<{ hasBackup: boolean; lastSync: string | null }> {
+  static async checkCloudBackupAvailable(username: string): Promise<{
+    hasBackup: boolean;
+    lastSync: string | null;
+    salt?: string;
+    kdfIterations?: number;
+  }> {
     try {
       const clean = username.trim().toLowerCase();
-      const res = await fetch(`/api/vault/status/${encodeURIComponent(clean)}`);
+      const res = await fetch(`/api/vault/status/${encodeURIComponent(clean)}`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        return { hasBackup: !!data.hasBackup, lastSync: data.lastSync || null };
+        return {
+          hasBackup: !!data.hasBackup,
+          lastSync: data.lastSync || null,
+          salt: data.salt,
+          kdfIterations: data.kdfIterations,
+        };
       }
       return { hasBackup: false, lastSync: null };
     } catch {
@@ -437,11 +456,16 @@ export class StorageService {
 
   /**
    * همگام‌سازی و ذخیره ابری اطلاعات با رمزنگاری صفر (Zero-Knowledge)
-   * داده‌ها در مرورگر رمزنگاری می‌شوند و فقط خروجی رمزشده ارسال می‌شود
+   * داده‌ها در مرورگر رمزنگاری می‌شوند و فقط خروجی رمزشده ارسال می‌شود.
+   * سرور فقط هش «توکن مالکیت» را نگه می‌دارد؛ بدون آن هیچ‌کس نمی‌تواند نسخه ابری را
+   * بخواند یا بازنویسی کند.
+   *
+   * @param previousKey  کلید قبلی (فقط هنگام تغییر رمز اصلی) برای اثبات مالکیت نسخه ابری قدیمی
    */
   static async syncVaultToCloud(
     username: string, 
-    key: CryptoKey
+    key: CryptoKey,
+    previousKey?: CryptoKey
   ): Promise<{ success: boolean; message: string; updatedAt?: string }> {
     const clean = username.trim().toLowerCase();
     const user = this.getUserByUsername(clean);
@@ -450,14 +474,16 @@ export class StorageService {
     }
 
     try {
+      await SecureStore.flush();
+      const keys = secureKeysFor(clean);
       // جمع‌آوری کامل داده‌های کاربر (رمزها، وام‌ها، هاست‌ها، تنظیمات تلگرام)
       const vaultItems = await this.loadDecryptedVault(clean, key);
       const loans = this.getLoansForUser(clean);
-      const hostingsRaw = localStorage.getItem(`keeppass_hosting_user_${clean}`);
-      const telegramRaw = localStorage.getItem(`keeppass_telegram_${clean}`);
+      const hostingsRaw = SecureStore.getItem(keys.hosting);
+      const telegramRaw = SecureStore.getItem(keys.telegram);
 
       const fullPackage = {
-        version: 2,
+        version: 3,
         userProfile: user,
         vaultItems,
         loans,
@@ -467,23 +493,30 @@ export class StorageService {
       };
 
       // رمزنگاری کامل بسته با کلید اصلی کاربر (AES-256-GCM)
-      const packageJson = JSON.stringify(fullPackage);
-      const encryptedPayload = await CryptoService.encrypt(packageJson, key);
+      const encryptedPayload = await CryptoService.encrypt(JSON.stringify(fullPackage), key);
+      const newAuthToken = await CryptoService.computeSyncAuthToken(key);
+      const authToken = previousKey ? await CryptoService.computeSyncAuthToken(previousKey) : newAuthToken;
 
-      // ارسال امن به سرور بدون افشای رمز عبور
+      // ارسال امن به سرور بدون افشای رمز عبور یا کلید
       const res = await fetch('/api/vault/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: clean,
+          authToken,
+          newAuthToken,
           salt: user.settings.salt,
+          kdfIterations: CryptoService.iterationsFor(user.settings),
           encryptedPayload,
-          schemaVersion: 2,
+          schemaVersion: 3,
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (res.status === 404) {
+          return { success: false, message: 'سرویس ابری روی این نسخه از سایت در دسترس نیست.' };
+        }
         return { success: false, message: data.error || 'خطا در ارسال داده‌ها به سرور ابری.' };
       }
 
@@ -518,29 +551,41 @@ export class StorageService {
     }
 
     try {
-      // ۱. دریافت فایل رمزشده از سرور ابری
-      const res = await fetch(`/api/vault/pull/${encodeURIComponent(clean)}`);
+      // ۱. دریافت پارامترهای عمومی (salt و تعداد تکرار) برای ساخت کلید
+      const status = await this.checkCloudBackupAvailable(clean);
+      if (!status.hasBackup || !status.salt) {
+        return { success: false, message: `هیچ نسخه پشتیبان ابری برای کاربر «${clean}» یافت نشد.` };
+      }
+
+      // ۲. ساخت کلید و توکن مالکیت در مرورگر
+      const iterations = CryptoService.iterationsFor({ kdfIterations: status.kdfIterations });
+      const derivedKey = await CryptoService.deriveKey(masterPassword, status.salt, iterations);
+      const authToken = await CryptoService.computeSyncAuthToken(derivedKey);
+
+      // ۳. دریافت فایل رمزشده (فقط با توکن مالکیت صحیح)
+      const res = await fetch('/api/vault/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: clean, authToken }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return { success: false, message: 'رمز عبور وارد شده برای این حساب ابری صحیح نیست.' };
+      }
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        return { 
-          success: false, 
-          message: errData.error || `هیچ نسخه پشتیبان ابری برای کاربر «${clean}» یافت نشد.` 
-        };
+        return { success: false, message: errData.error || 'خطا در دریافت نسخه پشتیبان ابری.' };
       }
 
       const { vault } = await res.json();
-      if (!vault || !vault.encryptedPayload || !vault.salt) {
+      if (!vault || !vault.encryptedPayload) {
         return { success: false, message: 'داده‌های ابری دریافت شده ساختار نامعتبری دارند.' };
       }
 
-      // ۲. استخراج کلید رمزگشایی با استفاده از نمک (salt) ذخیره‌شده و رمز عبور واردشده
-      const derivedKey = await CryptoService.deriveKey(masterPassword, vault.salt);
-
-      // ۳. تلاش برای رمزگشایی بسته ابری در مرورگر
+      // ۴. رمزگشایی بسته ابری در مرورگر
       let decryptedJson = '';
       try {
         decryptedJson = await CryptoService.decrypt(vault.encryptedPayload, derivedKey);
-      } catch (decryptErr) {
+      } catch {
         return { 
           success: false, 
           message: 'رمز عبور وارد شده اشتباه است یا با کلید رمزنگاری ابری مطابقت ندارد.' 
@@ -549,44 +594,63 @@ export class StorageService {
 
       const fullPackage = JSON.parse(decryptedJson);
 
-      // ۴. بازیابی و ثبت کاربر در ریجستری مرورگر
-      const users = this.getUsers().filter((u) => u.username.toLowerCase() !== clean);
-      const restoredUser: UserProfile = fullPackage.userProfile || {
+      // ۵. بازیابی و ثبت کاربر در ریجستری مرورگر (تنظیمات بیومتریک مخصوص هر دستگاه است)
+      const baseProfile: UserProfile = fullPackage.userProfile || {
         id: `user_restored_${Date.now()}`,
         username: clean,
         displayName: clean,
         createdAt: new Date().toISOString(),
         settings: {
           isSetup: true,
-          masterPasswordHash: await CryptoService.hashPassword(masterPassword, vault.salt),
-          salt: vault.salt,
+          masterPasswordHash: '',
+          salt: status.salt,
           biometricEnabled: false,
           biometricType: 'none',
           autoBiometricPrompt: false,
           autoLockMinutes: 5,
         },
       };
+      const restoredUser: UserProfile = {
+        ...baseProfile,
+        username: clean,
+        settings: {
+          ...baseProfile.settings,
+          isSetup: true,
+          salt: status.salt,
+          kdfIterations: iterations,
+          masterPasswordHash: await CryptoService.computeVerifier(derivedKey),
+          biometricEnabled: false,
+          biometricCredentialId: undefined,
+          biometricKeyMode: undefined,
+          autoBiometricPrompt: false,
+        },
+      };
 
+      const users = this.getUsers().filter((u) => u.username.toLowerCase() !== clean);
       users.push(restoredUser);
       this.saveUsers(users);
       this.setActiveUsername(clean);
+      await BiometricKeyStore.remove(clean);
 
-      // ۵. بازیابی موارد گاوصندوق
+      // ۶. بازیابی موارد گاوصندوق
       const vaultItems: VaultItem[] = fullPackage.vaultItems || [];
       await this.saveEncryptedVault(clean, vaultItems, derivedKey);
 
-      // ۶. بازیابی وام‌ها و هاست‌ها و تلگرام
-      if (fullPackage.loans && Array.isArray(fullPackage.loans)) {
+      // ۷. بازیابی وام‌ها و هاست‌ها و تلگرام (رمزنگاری‌شده)
+      const keys = secureKeysFor(clean);
+      [keys.loans, keys.hosting, keys.telegram].forEach((k) => localStorage.removeItem(k));
+      await SecureStore.open(clean, derivedKey);
+
+      if (Array.isArray(fullPackage.loans)) {
         this.saveLoansForUser(clean, fullPackage.loans);
       }
-
-      if (fullPackage.hostingItems && Array.isArray(fullPackage.hostingItems)) {
-        localStorage.setItem(`keeppass_hosting_user_${clean}`, JSON.stringify(fullPackage.hostingItems));
+      if (Array.isArray(fullPackage.hostingItems)) {
+        SecureStore.setItem(keys.hosting, JSON.stringify(fullPackage.hostingItems));
       }
-
       if (fullPackage.telegramSettings) {
-        localStorage.setItem(`keeppass_telegram_${clean}`, JSON.stringify(fullPackage.telegramSettings));
+        SecureStore.setItem(keys.telegram, JSON.stringify(fullPackage.telegramSettings));
       }
+      await SecureStore.flush();
 
       this.setLastCloudSyncTime(clean, vault.updatedAt || new Date().toISOString());
 
@@ -603,4 +667,3 @@ export class StorageService {
     }
   }
 }
-

@@ -1,15 +1,41 @@
+# KeepPass Vault — Cloudflare Workers configuration
+# Deployed automatically by .github/workflows/deploy.yml on every git push:
+#   main            → production (env.production)
+#   any other branch → staging   (env.staging)
 name = "keeppass-vault"
-compatibility_date = "2024-11-01"
+main = "worker/index.ts"
+compatibility_date = "2025-09-01"
 
-# پیکربندی استقرار فایل‌های استاتیک فرانت‌اند بر روی Cloudflare Workers
+# Static frontend (Vite build output). /api/* is handled by the Worker first.
 [assets]
 directory = "./dist"
+binding = "ASSETS"
 not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
-# محیط تستی (Staging / Preview)
+# Local development (`npm run dev:api`) uses a local simulated KV store.
+[[kv_namespaces]]
+binding = "VAULTS"
+id = "local-dev-vaults"
+
+# ---------------------------------------------------------------------------
+# Staging / Preview
+# The KV namespace id below is filled in automatically by scripts/ensure-kv.mjs
+# during the GitHub Actions deploy (it creates the namespace if it doesn't exist).
+# ---------------------------------------------------------------------------
 [env.staging]
 name = "keeppass-vault-staging"
 
-# محیط عملیاتی اصلی (Production)
+[[env.staging.kv_namespaces]]
+binding = "VAULTS"
+id = "__KV_ID_STAGING__"
+
+# ---------------------------------------------------------------------------
+# Production
+# ---------------------------------------------------------------------------
 [env.production]
 name = "keeppass-vault"
+
+[[env.production.kv_namespaces]]
+binding = "VAULTS"
+id = "__KV_ID_PRODUCTION__"

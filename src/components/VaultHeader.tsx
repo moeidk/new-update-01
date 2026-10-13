@@ -192,7 +192,7 @@ export const VaultHeader: React.FC<VaultHeaderProps> = ({
             onClick={onOpenSettings}
             className="p-2 rounded-xl bg-[#0F1524] hover:bg-[#182239] border border-[#1F2B47] text-[#94A2C2] hover:text-white transition cursor-pointer"
             style={{ backgroundColor: 'var(--ui-surface-subtle)', borderColor: 'var(--ui-border)', color: 'var(--ui-text-secondary)' }}
-            title="تنظیمات امنیت، کلودفلر و آیفون"
+            title="تنظیمات امنیت و آیفون"
             aria-label="تنظیمات"
           >
             <Settings className="w-4 h-4" />

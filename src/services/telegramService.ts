@@ -6,6 +6,7 @@
 import { TelegramSettings, LoanItem, HostingDomainItem } from '../types';
 import { compareJalaliDates, getCurrentJalali } from '../utils/jalali';
 import { formatCurrency, formatNumber } from '../utils/formatters';
+import { SecureStore } from './secureStore';
 
 const TELEGRAM_STORAGE_PREFIX = 'keeppass_telegram_user_';
 
@@ -18,7 +19,7 @@ export class TelegramService {
    * Retrieve saved Telegram settings for user
    */
   static getSettings(username: string): TelegramSettings {
-    const raw = localStorage.getItem(this.getKey(username));
+    const raw = SecureStore.getItem(this.getKey(username));
     if (raw) {
       try {
         return JSON.parse(raw);
@@ -43,7 +44,7 @@ export class TelegramService {
    * Save Telegram settings
    */
   static saveSettings(username: string, settings: TelegramSettings): void {
-    localStorage.setItem(this.getKey(username), JSON.stringify(settings));
+    SecureStore.setItem(this.getKey(username), JSON.stringify(settings));
   }
 
   /**
@@ -63,7 +64,7 @@ export class TelegramService {
   }
 
   /**
-   * Core message sender - tries backend Express proxy first (avoiding CORS/firewalls),
+   * Core message sender - tries the Cloudflare Worker proxy first (avoiding CORS/firewalls),
    * then falls back to direct browser fetch if server route is unavailable.
    */
   static async sendMessage(botToken: string, chatId: string, text: string): Promise<{ success: boolean; message: string }> {

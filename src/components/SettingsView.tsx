@@ -26,12 +26,13 @@ import {
 } from 'lucide-react';
 import { SecuritySettings, VaultItem, UserProfile, LoanItem, HostingDomainItem, TelegramSettings } from '../types';
 import { BiometricService } from '../services/webauthn';
-import { CryptoService } from '../services/crypto';
+import { CryptoService, KDF_ITERATIONS } from '../services/crypto';
+import { BiometricKeyStore } from '../services/biometricKeyStore';
+import { SecureStore } from '../services/secureStore';
 import { StorageService } from '../services/storage';
 import { TelegramService } from '../services/telegramService';
 import { LoanService } from '../services/loanService';
 import { HostingService } from '../services/hostingService';
-import { CloudflareWorkersCard } from './CloudflareWorkersCard';
 import { DeploymentManagerTab } from './DeploymentManagerTab';
 
 interface SettingsViewProps {
@@ -42,6 +43,8 @@ interface SettingsViewProps {
   hostingItems: HostingDomainItem[];
   currentKey: CryptoKey;
   onUpdateSettings: (newSettings: SecuritySettings) => void;
+  /** Called when the master password changes, so the app keeps using the new key. */
+  onChangeKey: (newKey: CryptoKey) => void;
   onImportVaultItems: (imported: VaultItem[]) => void;
   onResetVault: () => void;
 }
@@ -54,10 +57,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   hostingItems,
   currentKey,
   onUpdateSettings,
+  onChangeKey,
   onImportVaultItems,
   onResetVault,
 }) => {
-  const [activeTab, setActiveTab] = useState<'telegram' | 'deployment' | 'security' | 'backup' | 'cloudflare' | 'ios' | 'about'>('telegram');
+  const [activeTab, setActiveTab] = useState<'telegram' | 'deployment' | 'security' | 'backup' | 'ios' | 'about'>('telegram');
 
   // Telegram Settings State
   const [tgSettings, setTgSettings] = useState<TelegramSettings>(() => TelegramService.getSettings(currentUser.username));
@@ -160,26 +164,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleToggleBiometric = async (enabled: boolean) => {
     if (enabled) {
       try {
-        const credId = await BiometricService.registerBiometric();
-        await StorageService.cacheKeyForBiometrics(currentUser.username, currentKey);
+        const { credentialId, mode } = await BiometricKeyStore.enroll(currentUser.username, currentKey);
         const updated: SecuritySettings = {
           ...settings,
           biometricEnabled: true,
-          biometricCredentialId: credId,
+          biometricCredentialId: credentialId,
+          biometricKeyMode: mode,
           biometricType: deviceBio.type,
         };
         onUpdateSettings(updated);
         StorageService.saveUserSettings(currentUser.username, updated);
-        setBioTestStatus('✅ احراز هویت بیومتریک با موفقیت فعال شد.');
+        setBioTestStatus(
+          mode === 'prf'
+            ? '✅ ورود بیومتریک فعال شد (کلید گاوصندوق مستقیماً به حسگر بیومتریک قفل شده است).'
+            : '✅ ورود بیومتریک فعال شد (حالت سازگار: مرورگر شما از PRF پشتیبانی نمی‌کند).'
+        );
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'خطا در ثبت بیومتریک';
         setBioTestStatus(`❌ ${msg}`);
       }
     } else {
+      await BiometricKeyStore.remove(currentUser.username);
       const updated: SecuritySettings = {
         ...settings,
         biometricEnabled: false,
         biometricCredentialId: undefined,
+        biometricKeyMode: undefined,
       };
       onUpdateSettings(updated);
       StorageService.saveUserSettings(currentUser.username, updated);
@@ -220,8 +230,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       return;
     }
 
-    if (newPassword.length < 6) {
-      setPasswordNotice({ message: 'رمز عبور جدید باید حداقل ۶ کاراکتر باشد.', isError: true });
+    if (newPassword.length < 8) {
+      setPasswordNotice({ message: 'رمز عبور جدید باید حداقل ۸ کاراکتر باشد.', isError: true });
       return;
     }
 
@@ -229,39 +239,68 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setPasswordNotice(null);
 
     try {
-      const oldHash = await CryptoService.hashPassword(oldPassword, settings.salt);
-      if (oldHash !== settings.masterPasswordHash) {
+      const check = await CryptoService.verifyMasterPassword(oldPassword, settings);
+      if (!check.ok) {
         setPasswordNotice({ message: 'رمز عبور فعلی نادرست است.', isError: true });
         setIsChangingPassword(false);
         return;
       }
 
-      // Generate new salt and hash
+      // Generate new salt, key (600k PBKDF2 iterations) and key-derived verifier
+      const previousKey = currentKey;
       const newSalt = CryptoService.generateSalt();
-      const newHash = await CryptoService.hashPassword(newPassword, newSalt);
-      const newKey = await CryptoService.deriveKey(newPassword, newSalt);
+      const newKey = await CryptoService.deriveKey(newPassword, newSalt, KDF_ITERATIONS);
+      const newVerifier = await CryptoService.computeVerifier(newKey);
 
-      // Re-encrypt vault with new key
+      // Re-encrypt vault and protected data (loans, hosting, Telegram) with the new key
       await StorageService.saveEncryptedVault(currentUser.username, vaultItems, newKey);
+      await SecureStore.rekey(newKey);
 
-      // Re-cache for biometrics if enabled
-      if (settings.biometricEnabled) {
-        await StorageService.cacheKeyForBiometrics(currentUser.username, newKey);
-      }
-
-      const updatedSettings: SecuritySettings = {
+      let updatedSettings: SecuritySettings = {
         ...settings,
-        masterPasswordHash: newHash,
+        masterPasswordHash: newVerifier,
         salt: newSalt,
+        kdfIterations: KDF_ITERATIONS,
       };
-
-      onUpdateSettings(updatedSettings);
       StorageService.saveUserSettings(currentUser.username, updatedSettings);
+      onChangeKey(newKey);
+
+      // Re-wrap the biometric key for the new master key
+      let bioNote = '';
+      if (settings.biometricEnabled && settings.biometricCredentialId) {
+        try {
+          const mode = await BiometricKeyStore.wrapForCredential(
+            currentUser.username,
+            settings.biometricCredentialId,
+            newKey,
+            { tryPrf: settings.biometricKeyMode === 'prf' }
+          );
+          updatedSettings = { ...updatedSettings, biometricKeyMode: mode };
+        } catch {
+          await BiometricKeyStore.remove(currentUser.username);
+          updatedSettings = { ...updatedSettings, biometricEnabled: false, biometricCredentialId: undefined, biometricKeyMode: undefined };
+          bioNote = ' ورود بیومتریک غیرفعال شد؛ در صورت تمایل دوباره فعالش کنید.';
+        }
+        StorageService.saveUserSettings(currentUser.username, updatedSettings);
+      }
+      onUpdateSettings(updatedSettings);
+
+      // Keep the cloud backup in sync (proves ownership with the previous key)
+      let cloudNote = '';
+      if (StorageService.getLastCloudSyncTime(currentUser.username)) {
+        const syncRes = await StorageService.syncVaultToCloud(currentUser.username, newKey, previousKey);
+        if (syncRes.success) {
+          setLastCloudSync(syncRes.updatedAt || new Date().toISOString());
+          cloudNote = ' نسخه ابری هم به‌روز شد.';
+        } else {
+          cloudNote = ` ⚠️ به‌روزرسانی نسخه ابری انجام نشد: ${syncRes.message}`;
+        }
+      }
 
       setOldPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      setPasswordNotice({ message: '✅ رمز عبور اصلی با موفقیت تغییر کرد و گاوصندوق مجدداً رمزنگاری شد.', isError: false });
+      setPasswordNotice({ message: `✅ رمز عبور اصلی با موفقیت تغییر کرد و گاوصندوق مجدداً رمزنگاری شد.${bioNote}${cloudNote}`, isError: false });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'خطا در تغییر رمز';
       setPasswordNotice({ message: `❌ خطا: ${msg}`, isError: true });
@@ -395,7 +434,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               تنظیمات سامانه، پشتیبان و هشدارها
             </h1>
             <p className="text-xs text-[#94A2C2]" style={{ color: 'var(--ui-text-secondary)' }}>
-              پیکربندی ربات تلگرام، امنیت حساب، کلودفلر و مدیریت پشتیبان‌های رمزنگاری شده
+              پیکربندی ربات تلگرام، امنیت حساب و مدیریت پشتیبان‌های رمزنگاری شده
             </p>
           </div>
         </div>
@@ -436,7 +475,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           }`}
         >
           <Rocket className="w-4 h-4 text-amber-400" />
-          <span>استقرار و آپدیت (DevOps)</span>
+          <span>نسخه و به‌روزرسانی</span>
         </button>
 
         <button
@@ -464,18 +503,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </button>
 
         <button
-          onClick={() => setActiveTab('cloudflare')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeTab === 'cloudflare'
-              ? 'bg-[#4F7CFF] text-white shadow-md shadow-[#4F7CFF]/20'
-              : 'text-[#94A2C2] hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Cloud className="w-4 h-4 text-blue-400" />
-          <span>کلودفلر ورکرز</span>
-        </button>
-
-        <button
           onClick={() => setActiveTab('ios')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
             activeTab === 'ios'
@@ -491,7 +518,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* TAB CONTENT: DEPLOYMENT & DEVOPS */}
       {activeTab === 'deployment' && (
         <div className="space-y-6 animate-in fade-in duration-150">
-          <DeploymentManagerTab currentUsername={currentUser.username} />
+          <DeploymentManagerTab />
         </div>
       )}
 
@@ -1076,13 +1103,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* TAB CONTENT 4: CLOUDFLARE WORKERS */}
-      {activeTab === 'cloudflare' && (
-        <div className="space-y-6 animate-in fade-in duration-150">
-          <CloudflareWorkersCard />
         </div>
       )}
 

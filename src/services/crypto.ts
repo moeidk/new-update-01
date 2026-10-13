@@ -1,7 +1,22 @@
 /**
  * Cryptography Service for KeepPass Vault
- * Uses standard Web Crypto API (AES-GCM 256-bit + PBKDF2)
+ * Uses standard Web Crypto API (AES-GCM 256-bit + PBKDF2-SHA256)
+ *
+ * Security model:
+ * - The master key is derived with PBKDF2 (600k iterations for new keys, 100k for legacy users).
+ * - The stored password verifier is an HMAC derived from the master key, so checking a guessed
+ *   password costs a full PBKDF2 run (the old fast SHA-256 hash is only accepted for legacy
+ *   accounts and is replaced on the next successful login).
+ * - The cloud-sync auth token is a separate HMAC derived from the same key; the server only stores
+ *   its SHA-256 and never sees the password or the key.
  */
+
+/** PBKDF2 iterations for newly created keys (OWASP 2023+ recommendation for PBKDF2-HMAC-SHA256). */
+export const KDF_ITERATIONS = 600_000;
+/** Iterations used by accounts created before the hardening update. */
+export const LEGACY_KDF_ITERATIONS = 100_000;
+
+const VERIFIER_PREFIX = 'v2:';
 
 export class CryptoService {
   /**
@@ -14,9 +29,10 @@ export class CryptoService {
   }
 
   /**
-   * Hashes a password with salt using SHA-256 for password verification
+   * LEGACY: fast salted SHA-256 hash used by accounts created before the hardening update.
+   * Only used to verify (and then upgrade) old accounts — never for new data.
    */
-  static async hashPassword(password: string, saltBase64: string): Promise<string> {
+  static async legacyHashPassword(password: string, saltBase64: string): Promise<string> {
     const encoder = new TextEncoder();
     const saltBytes = this.base64ToUint8Array(saltBase64);
     const passBytes = encoder.encode(password);
@@ -33,7 +49,7 @@ export class CryptoService {
   /**
    * Derives an AES-GCM 256-bit CryptoKey from master password and salt using PBKDF2
    */
-  static async deriveKey(password: string, saltBase64: string): Promise<CryptoKey> {
+  static async deriveKey(password: string, saltBase64: string, iterations: number): Promise<CryptoKey> {
     const encoder = new TextEncoder();
     const saltBytes = this.base64ToUint8Array(saltBase64);
     const passKey = await crypto.subtle.importKey(
@@ -48,7 +64,7 @@ export class CryptoService {
       {
         name: 'PBKDF2',
         salt: saltBytes as unknown as BufferSource,
-        iterations: 100000,
+        iterations,
         hash: 'SHA-256',
       },
       passKey,
@@ -56,9 +72,81 @@ export class CryptoService {
         name: 'AES-GCM',
         length: 256,
       },
-      true, // extractable for biometric unlock caching if enabled
+      true, // extractable (in memory only) so it can be wrapped for biometric unlock and used for HMAC derivations
       ['encrypt', 'decrypt']
     );
+  }
+
+  /** Resolves the iteration count stored for an account (missing = legacy account). */
+  static iterationsFor(settings: { kdfIterations?: number } | null | undefined): number {
+    const n = settings?.kdfIterations;
+    return typeof n === 'number' && n >= 10_000 ? n : LEGACY_KDF_ITERATIONS;
+  }
+
+  /** HMAC-SHA256(rawKey, label) — domain-separated values derived from the master key. */
+  private static async deriveLabel(key: CryptoKey, label: string): Promise<Uint8Array> {
+    const raw = await crypto.subtle.exportKey('raw', key);
+    const hmacKey = await crypto.subtle.importKey(
+      'raw',
+      raw,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const sig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(label));
+    return new Uint8Array(sig);
+  }
+
+  /** Password verifier stored locally. Brute-forcing it costs a full PBKDF2 run per guess. */
+  static async computeVerifier(key: CryptoKey): Promise<string> {
+    const bytes = await this.deriveLabel(key, 'keeppass/password-verifier/v2');
+    return VERIFIER_PREFIX + this.uint8ArrayToBase64(bytes);
+  }
+
+  /** Token that proves ownership of a cloud backup. The server stores only SHA-256(token). */
+  static async computeSyncAuthToken(key: CryptoKey): Promise<string> {
+    const bytes = await this.deriveLabel(key, 'keeppass/cloud-sync-auth/v1');
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /**
+   * Verifies a master password against stored settings.
+   * Returns the derived key, and — for legacy accounts — the upgraded verifier to persist.
+   */
+  static async verifyMasterPassword(
+    password: string,
+    settings: { salt: string; masterPasswordHash: string; kdfIterations?: number }
+  ): Promise<{ ok: boolean; key?: CryptoKey; upgradedVerifier?: string }> {
+    const key = await this.deriveKey(password, settings.salt, this.iterationsFor(settings));
+    const stored = settings.masterPasswordHash || '';
+
+    if (stored.startsWith(VERIFIER_PREFIX)) {
+      const verifier = await this.computeVerifier(key);
+      return this.constantTimeEqual(verifier, stored) ? { ok: true, key } : { ok: false };
+    }
+
+    // Legacy account: compare against the old fast hash, then upgrade it.
+    const legacy = await this.legacyHashPassword(password, settings.salt);
+    if (!this.constantTimeEqual(legacy, stored)) return { ok: false };
+    return { ok: true, key, upgradedVerifier: await this.computeVerifier(key) };
+  }
+
+  static constantTimeEqual(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+  }
+
+  /** Cryptographically secure integer in [0, max) without modulo bias. */
+  static secureRandomInt(max: number): number {
+    if (max <= 0) return 0;
+    const limit = Math.floor(0x100000000 / max) * max;
+    const buf = new Uint32Array(1);
+    do {
+      crypto.getRandomValues(buf);
+    } while (buf[0] >= limit);
+    return buf[0] % max;
   }
 
   /**
@@ -193,37 +281,33 @@ export class CryptoService {
 
     if (useUpper) {
       charPool += upper;
-      guaranteedChars.push(upper[Math.floor(Math.random() * upper.length)]);
+      guaranteedChars.push(upper[this.secureRandomInt(upper.length)]);
     }
     if (useLower) {
       charPool += lower;
-      guaranteedChars.push(lower[Math.floor(Math.random() * lower.length)]);
+      guaranteedChars.push(lower[this.secureRandomInt(lower.length)]);
     }
     if (useNumbers) {
       charPool += numbers;
-      guaranteedChars.push(numbers[Math.floor(Math.random() * numbers.length)]);
+      guaranteedChars.push(numbers[this.secureRandomInt(numbers.length)]);
     }
     if (useSymbols) {
       charPool += symbols;
-      guaranteedChars.push(symbols[Math.floor(Math.random() * symbols.length)]);
+      guaranteedChars.push(symbols[this.secureRandomInt(symbols.length)]);
     }
 
     if (!charPool) {
       charPool = lower + numbers;
     }
 
-    const randomArray = new Uint32Array(length);
-    crypto.getRandomValues(randomArray);
-
     const resultChars: string[] = [...guaranteedChars];
     for (let i = guaranteedChars.length; i < length; i++) {
-      const idx = randomArray[i] % charPool.length;
-      resultChars.push(charPool[idx]);
+      resultChars.push(charPool[this.secureRandomInt(charPool.length)]);
     }
 
     // Shuffle characters
     for (let i = resultChars.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = this.secureRandomInt(i + 1);
       [resultChars[i], resultChars[j]] = [resultChars[j], resultChars[i]];
     }
 

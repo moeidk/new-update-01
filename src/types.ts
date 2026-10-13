@@ -31,14 +31,16 @@ export type BiometricType = 'face-id' | 'touch-id' | 'fingerprint' | 'generic' |
 
 export interface SecuritySettings {
   isSetup: boolean;
-  masterPasswordHash: string; // SHA-256 with salt
+  masterPasswordHash: string; // 'v2:' HMAC verifier derived from the master key (legacy: salted SHA-256)
   salt: string; // Base64 salt for PBKDF2
+  kdfIterations?: number; // PBKDF2 iterations (missing = legacy 100,000)
   biometricEnabled: boolean;
   biometricCredentialId?: string;
   biometricType: BiometricType;
   autoBiometricPrompt: boolean; // Auto prompt Face ID / Touch ID on app launch
   autoLockMinutes: number; // 0 = immediate on background, 1, 5, 15, -1 = never
-  encryptedKeyForBiometrics?: string; // encrypted AES key representation for instant biometric unlock
+  /** How the biometric unlock key is protected on this device ('prf' = bound to Face ID/fingerprint via WebAuthn PRF). */
+  biometricKeyMode?: 'prf' | 'device';
 }
 
 export interface UserProfile {

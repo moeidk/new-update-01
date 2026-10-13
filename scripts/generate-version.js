@@ -19,7 +19,7 @@ function getGitCommit() {
       .toString()
       .trim();
   } catch {
-    return 'c' + Math.floor(100000 + Math.random() * 900000).toString(16);
+    return (process.env.GITHUB_SHA || 'local').slice(0, 7);
   }
 }
 
@@ -30,6 +30,18 @@ function getGitBranch() {
       .trim();
   } catch {
     return process.env.BRANCH || process.env.CF_PAGES_BRANCH || 'main';
+  }
+}
+
+function getRecentChanges() {
+  try {
+    return execSync('git log -8 --no-merges --pretty=format:%s', { cwd: rootDir, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -47,20 +59,18 @@ const gitCommit = getGitCommit();
 const gitBranch = getGitBranch();
 const pkgVersion = readPackageVersion();
 
+// DEPLOY_ENV is set by the GitHub Actions workflow (production / staging).
+const environment = process.env.DEPLOY_ENV || (process.env.NODE_ENV === 'production' ? 'production' : 'development');
+
 const versionData = {
   version: pkgVersion,
   buildTime,
   gitCommit,
-  gitBranch,
-  schemaVersion: 2,
-  environment: process.env.NODE_ENV === 'production' ? 'production' : (process.env.CF_PAGES_BRANCH ? 'staging' : 'development'),
+  gitBranch: process.env.GITHUB_REF_NAME || gitBranch,
+  schemaVersion: 3,
+  environment,
   releaseName: `KeepPass v${pkgVersion} (${gitCommit})`,
-  changelog: [
-    'سیستم استقرار دو مرحله‌ای Staging و Production فعال شد',
-    'پایش خودکار و اعلان به‌روزرسانی برای مدیر سامانه',
-    'موتور مایگریشن مصون‌ساز داده‌های کاربران (Idempotent)',
-    'پشتیبانی کامل از ارزیابی کلودفلر Workers و Pages'
-  ]
+  changelog: getRecentChanges(),
 };
 
 // Ensure public directory exists

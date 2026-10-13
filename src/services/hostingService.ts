@@ -4,6 +4,7 @@
  */
 import { HostingDomainItem, HostingType } from '../types';
 import { compareJalaliDates, parseJalali, getCurrentJalali } from '../utils/jalali';
+import { SecureStore } from './secureStore';
 
 const HOSTING_STORAGE_PREFIX = 'keeppass_hosting_user_';
 
@@ -17,7 +18,7 @@ export class HostingService {
    */
   static getHostingItems(username: string): HostingDomainItem[] {
     const key = this.getKey(username);
-    const raw = localStorage.getItem(key);
+    const raw = SecureStore.getItem(key);
     if (raw) {
       try {
         const parsed: HostingDomainItem[] = JSON.parse(raw);
@@ -29,7 +30,7 @@ export class HostingService {
                   it.name !== 'سرور ابری آلمان Hetzner CX21'
         );
         if (cleaned.length !== parsed.length) {
-          localStorage.setItem(key, JSON.stringify(cleaned));
+          SecureStore.setItem(key, JSON.stringify(cleaned));
         }
         return this.updateStatuses(cleaned);
       } catch {
@@ -75,7 +76,7 @@ export class HostingService {
     }
 
     const final = this.updateStatuses(updated);
-    localStorage.setItem(this.getKey(username), JSON.stringify(final));
+    SecureStore.setItem(this.getKey(username), JSON.stringify(final));
     return final;
   }
 
@@ -85,7 +86,7 @@ export class HostingService {
   static deleteHostingItem(username: string, id: string): HostingDomainItem[] {
     const items = this.getHostingItems(username);
     const filtered = items.filter((it) => it.id !== id);
-    localStorage.setItem(this.getKey(username), JSON.stringify(filtered));
+    SecureStore.setItem(this.getKey(username), JSON.stringify(filtered));
     return filtered;
   }
 
@@ -126,7 +127,7 @@ export class HostingService {
     });
 
     const final = this.updateStatuses(updated);
-    localStorage.setItem(this.getKey(username), JSON.stringify(final));
+    SecureStore.setItem(this.getKey(username), JSON.stringify(final));
     return final;
   }
 

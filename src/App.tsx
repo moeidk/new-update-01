@@ -41,7 +41,7 @@ import { PasswordGeneratorModal } from './components/PasswordGeneratorModal';
 import { IOSInstallGuideModal } from './components/IOSInstallGuideModal';
 import { IOSAutoFillModal } from './components/IOSAutoFillModal';
 import { DataMigrationService } from './services/dataMigration';
-import { AdminReleaseNotification } from './components/AdminReleaseNotification';
+import { UpdateBanner } from './components/UpdateBanner';
 
 import { 
   Menu, 
@@ -109,6 +109,8 @@ export default function App() {
   useEffect(() => {
     // Run idempotent client-side data migrations
     DataMigrationService.runMigrations();
+    // Security: remove raw vault keys left in localStorage by older versions
+    StorageService.purgeLegacyBiometricTokens();
 
     const savedTheme = StorageService.getTheme();
     setTheme(savedTheme);
@@ -123,6 +125,7 @@ export default function App() {
 
   // Lock handler (also switches user / returns to auth screen)
   const handleLock = useCallback(() => {
+    StorageService.closeSession();
     setCurrentKey(null);
     setCurrentUser(null);
     setVaultItems([]);
@@ -134,6 +137,14 @@ export default function App() {
 
   // Unlock handler
   const handleUnlocked = async (user: UserProfile, key: CryptoKey) => {
+    // 0. Decrypt protected per-user data (loans, hosting, Telegram) into memory
+    //    before any view can read it.
+    try {
+      await StorageService.openSession(user.username, key);
+    } catch (e) {
+      console.error('Failed to open secure session:', e);
+    }
+
     setCurrentUser(user);
     setSettings(user.settings);
     setCurrentKey(key);
@@ -233,13 +244,14 @@ export default function App() {
     const now = new Date().toISOString();
     let updatedItems: VaultItem[];
 
-    if (itemData.id) {
+    const isExisting = !!itemData.id && vaultItems.some((it) => it.id === itemData.id);
+    if (isExisting) {
       updatedItems = vaultItems.map((it) =>
         it.id === itemData.id ? ({ ...it, ...itemData, updatedAt: now } as VaultItem) : it
       );
     } else {
       const newItem: VaultItem = {
-        id: `item-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        id: `item-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
         title: itemData.title || 'بدون عنوان',
         category: itemData.category || 'login',
         username: itemData.username,
@@ -251,7 +263,7 @@ export default function App() {
         cvv2: itemData.cvv2,
         expireDate: itemData.expireDate,
         pin: itemData.pin,
-        isFavorite: false,
+        isFavorite: itemData.isFavorite ?? false,
         tags: itemData.tags || [],
         createdAt: now,
         updatedAt: now,
@@ -261,6 +273,7 @@ export default function App() {
 
     setVaultItems(updatedItems);
     await StorageService.saveEncryptedVault(currentUser.username, updatedItems, currentKey);
+    setIsItemModalOpen(false);
   };
 
   const handleToggleFavoriteVaultItem = async (id: string) => {
@@ -297,7 +310,12 @@ export default function App() {
 
   // If locked or no user active: render clean LockScreen
   if (!currentKey || !currentUser) {
-    return <LockScreen onUnlocked={handleUnlocked} />;
+    return (
+      <>
+        <LockScreen onUnlocked={handleUnlocked} />
+        <UpdateBanner />
+      </>
+    );
   }
 
   // View Title and Subtitle Mapping
@@ -310,7 +328,7 @@ export default function App() {
     calculator: { title: 'ماشین‌حساب هوشمند تسهیلات', subtitle: 'محاسبه رسمی سود و اقساط بانک مرکزی ایران' },
     alerts: { title: 'مرکز هشدارها و سررسیدها', subtitle: 'اقساط معوقه و موعدهای پرداخت فوری' },
     vault: { title: 'گاوصندوق رمزها و حساب‌ها', subtitle: 'حفاظت امنیتی با کلید رمزنگاری اختصاصی' },
-    settings: { title: 'تنظیمات سامانه، تلگرام و پشتیبان', subtitle: 'پیکربندی ربات تلگرام، امنیت، کلودفلر و فایل‌های پشتیبان' },
+    settings: { title: 'تنظیمات سامانه، تلگرام و پشتیبان', subtitle: 'پیکربندی ربات تلگرام، امنیت، نسخه برنامه و فایل‌های پشتیبان' },
   };
 
   return (
@@ -544,7 +562,11 @@ export default function App() {
               loans={loans}
               hostingItems={hostingItems}
               currentKey={currentKey}
-              onUpdateSettings={(newSettings) => setSettings(newSettings)}
+              onUpdateSettings={(newSettings) => {
+                setSettings(newSettings);
+                setCurrentUser((u) => (u ? { ...u, settings: newSettings } : u));
+              }}
+              onChangeKey={(newKey) => setCurrentKey(newKey)}
               onImportVaultItems={handleImportVaultItems}
               onResetVault={handleResetVault}
             />
@@ -665,10 +687,8 @@ export default function App() {
         onClose={() => setIsAutoFillGuideOpen(false)}
       />
 
-      {/* 5. Admin Staging-to-Production Release Notification */}
-      <AdminReleaseNotification
-        currentUsername={currentUser?.username || ''}
-      />
+      {/* 5. New version available banner (auto-deploy on git push) */}
+      <UpdateBanner />
     </div>
   );
 }

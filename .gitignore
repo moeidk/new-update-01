@@ -9,3 +9,6 @@ coverage/
 public/version.json
 backups/
 .aistudio/
+.wrangler/
+.wrangler-dry-run/
+.dev.vars

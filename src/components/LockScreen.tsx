@@ -20,8 +20,9 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { SecuritySettings, UserProfile } from '../types';
-import { CryptoService } from '../services/crypto';
+import { CryptoService, KDF_ITERATIONS } from '../services/crypto';
 import { BiometricService } from '../services/webauthn';
+import { BiometricKeyStore } from '../services/biometricKeyStore';
 import { StorageService } from '../services/storage';
 import { IOSAutoFillService } from '../services/iosAutofill';
 import { IOSAutoFillModal } from './IOSAutoFillModal';
@@ -143,8 +144,8 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
       return;
     }
 
-    if (!password || password.length < 4) {
-      setErrorMsg('رمز عبور باید حداقل ۴ کاراکتر باشد.');
+    if (!password || password.length < 8) {
+      setErrorMsg('رمز عبور اصلی باید حداقل ۸ کاراکتر باشد.');
       return;
     }
 
@@ -162,17 +163,19 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
     setIsLoading(true);
     try {
       const salt = CryptoService.generateSalt();
-      const derivedKey = await CryptoService.deriveKey(password, salt);
-      const hash = await CryptoService.hashPassword(password, salt);
+      const derivedKey = await CryptoService.deriveKey(password, salt, KDF_ITERATIONS);
+      const hash = await CryptoService.computeVerifier(derivedKey);
 
       let bioRegistered = false;
       let credId: string | undefined = undefined;
+      let bioMode: 'prf' | 'device' | undefined = undefined;
 
       if (enableBioOnRegister && bioAvailable) {
         try {
-          credId = await BiometricService.registerBiometric();
+          const enrolled = await BiometricKeyStore.enroll(cleanUsername, derivedKey);
+          credId = enrolled.credentialId;
+          bioMode = enrolled.mode;
           bioRegistered = true;
-          await StorageService.cacheKeyForBiometrics(cleanUsername, derivedKey);
         } catch (bioErr) {
           console.warn('Biometric registration skipped or failed:', bioErr);
         }
@@ -185,7 +188,9 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
         hash,
         salt,
         bioRegistered,
-        credId
+        credId,
+        KDF_ITERATIONS,
+        bioMode
       );
 
       // Offer saving to iOS Keychain AutoFill
@@ -254,11 +259,8 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
 
     setIsLoading(true);
     try {
-      const settings = user.settings;
-      const derivedKey = await CryptoService.deriveKey(targetPass, settings.salt);
-      const computedHash = await CryptoService.hashPassword(targetPass, settings.salt);
-
-      if (computedHash !== settings.masterPasswordHash) {
+      const result = await StorageService.unlockWithPassword(user, targetPass);
+      if (!result.ok || !result.key || !result.user) {
         setErrorMsg('رمز عبور وارد شده اشتباه است.');
         setIsLoading(false);
         return;
@@ -268,12 +270,10 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
       IOSAutoFillService.saveMasterPasswordToKeychain(targetPass, cleanUsername);
       StorageService.setActiveUsername(cleanUsername);
 
-      // Cache for biometrics if enabled
-      if (settings.biometricEnabled) {
-        await StorageService.cacheKeyForBiometrics(cleanUsername, derivedKey);
-      }
+      // Keep biometric unlock working on this device (stored wrapped, never as a raw key)
+      const readyUser = await StorageService.ensureBiometricKey(result.user, result.key);
 
-      onUnlocked(user, derivedKey);
+      onUnlocked(readyUser, result.key);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'خطا در ورود به گاوصندوق.';
       setErrorMsg(msg);
@@ -331,19 +331,18 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
     setErrorMsg('');
 
     try {
-      // 1. WebAuthn prompt
-      if (userToUnlock.settings.biometricCredentialId) {
-        await BiometricService.verifyBiometric(userToUnlock.settings.biometricCredentialId);
-      }
+      // Biometric prompt + unwrap the stored (encrypted) vault key
+      const unlockedKey = await BiometricKeyStore.unlock(userToUnlock.username);
 
-      // 2. Retrieve cached key
-      const cachedKey = await StorageService.getCachedKeyForBiometrics(userToUnlock.username);
-      if (!cachedKey) {
-        throw new Error('کلید بیومتریک در حافظه منقضی شده است. لطفاً یک‌بار با رمز عبور وارد شوید.');
+      // Make sure the key still matches this account (e.g. after a password change)
+      const stored = userToUnlock.settings.masterPasswordHash || '';
+      if (stored.startsWith('v2:') && (await CryptoService.computeVerifier(unlockedKey)) !== stored) {
+        await BiometricKeyStore.remove(userToUnlock.username);
+        throw new Error('کلید بیومتریک قدیمی است. لطفاً یک‌بار با رمز عبور وارد شوید.');
       }
 
       StorageService.setActiveUsername(userToUnlock.username);
-      onUnlocked(userToUnlock, cachedKey);
+      onUnlocked(userToUnlock, unlockedKey);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'احراز هویت بیومتریک ناموفق بود.';
       console.warn('Biometric unlock failed:', msg);
@@ -714,7 +713,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="حداقل ۴ کاراکتر قوی..."
+                  placeholder="حداقل ۸ کاراکتر قوی..."
                   autoComplete="new-password"
                   className="w-full bg-[#0F1524] border border-[#1F2B47] rounded-xl px-4 py-3 text-sm text-white placeholder-[#5D6B8F] focus:outline-none focus:border-[#4F7CFF] focus:ring-1 focus:ring-[#4F7CFF] transition font-sans"
                   style={{ backgroundColor: 'var(--ui-surface-subtle)', borderColor: 'var(--ui-border)' }}

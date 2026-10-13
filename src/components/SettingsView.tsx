@@ -29,6 +29,8 @@ import { BiometricService } from '../services/webauthn';
 import { CryptoService, KDF_ITERATIONS } from '../services/crypto';
 import { BiometricKeyStore } from '../services/biometricKeyStore';
 import { SecureStore } from '../services/secureStore';
+import { AutoSyncService } from '../services/autoSync';
+import { useAutoSyncState, describeSync } from './SyncStatus';
 import { StorageService } from '../services/storage';
 import { TelegramService } from '../services/telegramService';
 import { LoanService } from '../services/loanService';
@@ -288,7 +290,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       // Keep the cloud backup in sync (proves ownership with the previous key)
       let cloudNote = '';
       if (StorageService.getLastCloudSyncTime(currentUser.username)) {
-        const syncRes = await StorageService.syncVaultToCloud(currentUser.username, newKey, previousKey);
+        const syncRes = await StorageService.syncVaultToCloud(currentUser.username, newKey, { previousKey });
         if (syncRes.success) {
           setLastCloudSync(syncRes.updatedAt || new Date().toISOString());
           cloudNote = ' نسخه ابری هم به‌روز شد.';
@@ -396,17 +398,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  // Automatic cloud sync toggle & live status
+  const syncState = useAutoSyncState();
+  const autoSyncOn = settings.autoCloudSync !== false;
+  const handleToggleAutoSync = (on: boolean) => {
+    const updated: SecuritySettings = { ...settings, autoCloudSync: on };
+    onUpdateSettings(updated);
+    StorageService.saveUserSettings(currentUser.username, updated);
+    AutoSyncService.setEnabled(on);
+  };
+
   // Zero-Knowledge Cloud Sync handler
   const handleSyncToCloud = async () => {
     setIsSyncingCloud(true);
     setCloudNotice(null);
     try {
-      const res = await StorageService.syncVaultToCloud(currentUser.username, currentKey);
-      if (res.success) {
-        setLastCloudSync(res.updatedAt || new Date().toISOString());
-        setCloudNotice({ message: '✅ ' + res.message, isError: false });
+      await AutoSyncService.syncNow({ manual: true });
+      const st = AutoSyncService.getState();
+      if (st.status === 'synced') {
+        setLastCloudSync(st.lastSyncAt || new Date().toISOString());
+        setCloudNotice({ message: '✅ همگام‌سازی ابری با موفقیت انجام شد و داده‌ها به صورت رمزنگاری‌شده ذخیره گردیدند.', isError: false });
+      } else if (st.status === 'conflict') {
+        setCloudNotice({ message: '⚠️ نسخه جدیدتری از دستگاه دیگری در ابر هست؛ از پیام بالای صفحه انتخاب کنید کدام نسخه بماند.', isError: true });
       } else {
-        setCloudNotice({ message: '❌ ' + res.message, isError: true });
+        setCloudNotice({ message: '❌ ' + (st.message || 'ذخیره ابری انجام نشد.'), isError: true });
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'خطا در ارتباط';
@@ -1001,6 +1016,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <p className="text-[11px] text-[#94A2C2] leading-relaxed">
                   اطلاعات در دستگاه شما رمزگذاری می‌شوند و کلید هرگز به سرور ارسال نمی‌شود؛ در صورت حذف برنامه، با رمز اصلی برمی‌گردند.
                 </p>
+
+                {/* Automatic sync toggle */}
+                <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-black/20 border border-white/5 cursor-pointer">
+                  <div>
+                    <div className="text-xs font-bold text-white">همگام‌سازی خودکار</div>
+                    <div className="text-[11px] text-[#94A2C2] mt-0.5">
+                      {autoSyncOn ? describeSync(syncState).text : 'خاموش — فقط با دکمه زیر ذخیره می‌شود'}
+                    </div>
+                  </div>
+                  <span className="relative inline-flex shrink-0">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={autoSyncOn}
+                      onChange={(e) => handleToggleAutoSync(e.target.checked)}
+                      aria-label="همگام‌سازی خودکار"
+                    />
+                    <span className="w-11 h-6 rounded-full bg-[#1F2B47] peer-checked:bg-emerald-500 transition" />
+                    <span className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-white shadow transition peer-checked:-translate-x-5" />
+                  </span>
+                </label>
                 <button
                   type="button"
                   disabled={isSyncingCloud}

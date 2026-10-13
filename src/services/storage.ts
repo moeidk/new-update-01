@@ -5,6 +5,7 @@ import { VaultItem, SecuritySettings, UserProfile, LoanItem } from '../types';
 import { CryptoService, KDF_ITERATIONS } from './crypto';
 import { SecureStore, secureKeysFor, scrubSnapshots } from './secureStore';
 import { BiometricKeyStore } from './biometricKeyStore';
+import { ChangeBus } from './changeBus';
 
 /** localStorage prefix where older versions stored the RAW vault key (insecure, now removed). */
 const LEGACY_BIO_TOKEN_PREFIX = 'keeppass_bio_token_';
@@ -191,6 +192,7 @@ export class StorageService {
     if (idx !== -1) {
       users[idx].settings = settings;
       this.saveUsers(users);
+      ChangeBus.emit(clean);
     }
   }
 
@@ -216,6 +218,7 @@ export class StorageService {
     const jsonStr = JSON.stringify(items);
     const encrypted = await CryptoService.encrypt(jsonStr, key);
     localStorage.setItem(this.getVaultKey(username), encrypted);
+    ChangeBus.emit(username);
   }
 
   /**
@@ -419,6 +422,21 @@ export class StorageService {
     return `keeppass_last_cloud_sync_${username.trim().toLowerCase()}`;
   }
 
+  private static getCloudRevisionKey(username: string): string {
+    return `keeppass_cloud_rev_${username.trim().toLowerCase()}`;
+  }
+
+  /** Last cloud revision this device saw (null = never synced from this device). */
+  static getCloudRevision(username: string): number | null {
+    const raw = localStorage.getItem(this.getCloudRevisionKey(username));
+    const n = raw === null ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  static setCloudRevision(username: string, revision: number): void {
+    localStorage.setItem(this.getCloudRevisionKey(username), String(revision));
+  }
+
   static getLastCloudSyncTime(username: string): string | null {
     return localStorage.getItem(this.getCloudSyncKey(username));
   }
@@ -435,6 +453,8 @@ export class StorageService {
     lastSync: string | null;
     salt?: string;
     kdfIterations?: number;
+    revision?: number;
+    reachable?: boolean;
   }> {
     try {
       const clean = username.trim().toLowerCase();
@@ -446,11 +466,13 @@ export class StorageService {
           lastSync: data.lastSync || null,
           salt: data.salt,
           kdfIterations: data.kdfIterations,
+          revision: typeof data.revision === 'number' ? data.revision : undefined,
+          reachable: true,
         };
       }
-      return { hasBackup: false, lastSync: null };
+      return { hasBackup: false, lastSync: null, reachable: false };
     } catch {
-      return { hasBackup: false, lastSync: null };
+      return { hasBackup: false, lastSync: null, reachable: false };
     }
   }
 
@@ -463,30 +485,38 @@ export class StorageService {
    * @param previousKey  کلید قبلی (فقط هنگام تغییر رمز اصلی) برای اثبات مالکیت نسخه ابری قدیمی
    */
   static async syncVaultToCloud(
-    username: string, 
+    username: string,
     key: CryptoKey,
-    previousKey?: CryptoKey
-  ): Promise<{ success: boolean; message: string; updatedAt?: string }> {
+    opts: { previousKey?: CryptoKey; force?: boolean } = {}
+  ): Promise<{
+    success: boolean;
+    message: string;
+    updatedAt?: string;
+    revision?: number;
+    /** HTTP status (0 = network error / offline). */
+    status?: number;
+    conflict?: boolean;
+  }> {
     const clean = username.trim().toLowerCase();
     const user = this.getUserByUsername(clean);
     if (!user) {
       return { success: false, message: 'کاربر جهت همگام‌سازی یافت نشد.' };
     }
 
-    try {
-      await SecureStore.flush();
-      const keys = secureKeysFor(clean);
-      // جمع‌آوری کامل داده‌های کاربر (رمزها، وام‌ها، هاست‌ها، تنظیمات تلگرام)
-      const vaultItems = await this.loadDecryptedVault(clean, key);
-      const loans = this.getLoansForUser(clean);
-      const hostingsRaw = SecureStore.getItem(keys.hosting);
-      const telegramRaw = SecureStore.getItem(keys.telegram);
+    // Snapshot protected data synchronously, so a lock right after this call can't race it.
+    const keys = secureKeysFor(clean);
+    const loansRaw = SecureStore.getItem(keys.loans);
+    const hostingsRaw = SecureStore.getItem(keys.hosting);
+    const telegramRaw = SecureStore.getItem(keys.telegram);
 
+    let res: Response;
+    try {
+      const vaultItems = await this.loadDecryptedVaultSilently(clean, key);
       const fullPackage = {
         version: 3,
         userProfile: user,
         vaultItems,
-        loans,
+        loans: loansRaw ? JSON.parse(loansRaw) : [],
         hostingItems: hostingsRaw ? JSON.parse(hostingsRaw) : [],
         telegramSettings: telegramRaw ? JSON.parse(telegramRaw) : null,
         syncedAt: new Date().toISOString(),
@@ -495,10 +525,10 @@ export class StorageService {
       // رمزنگاری کامل بسته با کلید اصلی کاربر (AES-256-GCM)
       const encryptedPayload = await CryptoService.encrypt(JSON.stringify(fullPackage), key);
       const newAuthToken = await CryptoService.computeSyncAuthToken(key);
-      const authToken = previousKey ? await CryptoService.computeSyncAuthToken(previousKey) : newAuthToken;
+      const authToken = opts.previousKey ? await CryptoService.computeSyncAuthToken(opts.previousKey) : newAuthToken;
 
       // ارسال امن به سرور بدون افشای رمز عبور یا کلید
-      const res = await fetch('/api/vault/sync', {
+      res = await fetch('/api/vault/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -509,26 +539,90 @@ export class StorageService {
           kdfIterations: CryptoService.iterationsFor(user.settings),
           encryptedPayload,
           schemaVersion: 3,
+          baseRevision: this.getCloudRevision(clean),
+          force: opts.force === true,
         }),
       });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        if (res.status === 404) {
-          return { success: false, message: 'سرویس ابری روی این نسخه از سایت در دسترس نیست.' };
-        }
-        return { success: false, message: data.error || 'خطا در ارسال داده‌ها به سرور ابری.' };
-      }
-
-      this.setLastCloudSyncTime(clean, data.updatedAt);
-      return { 
-        success: true, 
-        message: 'همگام‌سازی ابری با موفقیت انجام شد و داده‌ها به صورت رمزنگاری‌شده ذخیره گردیدند.', 
-        updatedAt: data.updatedAt 
-      };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, message: `خطا در فرآیند رمزنگاری و همگام‌سازی ابری: ${msg}` };
+      return { success: false, status: 0, message: `ارتباط با سرور ابری برقرار نشد (${msg}).` };
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 409 && data.conflict) {
+      return {
+        success: false,
+        status: 409,
+        conflict: true,
+        revision: data.revision,
+        updatedAt: data.updatedAt,
+        message: 'نسخه جدیدتری از دستگاه دیگری در فضای ابری هست.',
+      };
+    }
+    if (!res.ok) {
+      if (res.status === 404) {
+        return { success: false, status: 404, message: 'سرویس ابری روی این نسخه از سایت در دسترس نیست.' };
+      }
+      return { success: false, status: res.status, message: data.error || 'خطا در ارسال داده‌ها به سرور ابری.' };
+    }
+
+    this.setLastCloudSyncTime(clean, data.updatedAt);
+    if (typeof data.revision === 'number') this.setCloudRevision(clean, data.revision);
+    return {
+      success: true,
+      status: 200,
+      revision: data.revision,
+      message: 'همگام‌سازی ابری با موفقیت انجام شد و داده‌ها به صورت رمزنگاری‌شده ذخیره گردیدند.',
+      updatedAt: data.updatedAt,
+    };
+  }
+
+  /** Reads the vault without triggering a sync for the "sample item cleanup" write. */
+  private static loadDecryptedVaultSilently(username: string, key: CryptoKey): Promise<VaultItem[]> {
+    return ChangeBus.silently(() => this.loadDecryptedVault(username, key));
+  }
+
+  /**
+   * Replaces this device's data with the cloud copy, using the already-unlocked key
+   * (used when another device saved newer data). Returns false if the key doesn't match.
+   */
+  static async pullCloudIntoLocal(
+    username: string,
+    key: CryptoKey
+  ): Promise<{ success: boolean; message: string }> {
+    const clean = username.trim().toLowerCase();
+    try {
+      const authToken = await CryptoService.computeSyncAuthToken(key);
+      const res = await fetch('/api/vault/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: clean, authToken }),
+      });
+      if (res.status === 403) {
+        return { success: false, message: 'نسخه ابری با رمز دیگری ذخیره شده است. برای دریافت آن از «بازیابی» در صفحه ورود با همان رمز استفاده کنید.' };
+      }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        return { success: false, message: e.error || 'خطا در دریافت نسخه ابری.' };
+      }
+      const { vault } = await res.json();
+      const pkg = JSON.parse(await CryptoService.decrypt(vault.encryptedPayload, key));
+      const keys = secureKeysFor(clean);
+
+      await ChangeBus.silently(async () => {
+        await this.saveEncryptedVault(clean, pkg.vaultItems || [], key);
+        if (Array.isArray(pkg.loans)) this.saveLoansForUser(clean, pkg.loans);
+        if (Array.isArray(pkg.hostingItems)) SecureStore.setItem(keys.hosting, JSON.stringify(pkg.hostingItems));
+        if (pkg.telegramSettings) SecureStore.setItem(keys.telegram, JSON.stringify(pkg.telegramSettings));
+        await SecureStore.flush();
+      });
+
+      if (typeof vault.revision === 'number') this.setCloudRevision(clean, vault.revision);
+      this.setLastCloudSyncTime(clean, vault.updatedAt || new Date().toISOString());
+      return { success: true, message: 'اطلاعات این دستگاه با نسخه ابری به‌روز شد.' };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: `خطا در دریافت نسخه ابری: ${msg}` };
     }
   }
 
@@ -653,6 +747,7 @@ export class StorageService {
       await SecureStore.flush();
 
       this.setLastCloudSyncTime(clean, vault.updatedAt || new Date().toISOString());
+      if (typeof vault.revision === 'number') this.setCloudRevision(clean, vault.revision);
 
       return {
         success: true,

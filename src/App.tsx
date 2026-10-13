@@ -44,6 +44,8 @@ import { DataMigrationService } from './services/dataMigration';
 import { UpdateBanner } from './components/UpdateBanner';
 import { AppVersionFooter } from './components/AppVersionFooter';
 import { UnlockingScreen } from './components/UnlockingScreen';
+import { AutoSyncService } from './services/autoSync';
+import { SyncStatusIndicator, SyncConflictBanner } from './components/SyncStatus';
 
 import { 
   Menu, 
@@ -127,8 +129,17 @@ export default function App() {
   };
 
   // Lock handler (also switches user / returns to auth screen)
+  // Session bookkeeping so a late auto-sync from a previous session never closes a new one
+  const sessionGenRef = useRef(0);
+  const sessionRef = useRef<{ username: string; key: CryptoKey } | null>(null);
+
   const handleLock = useCallback(() => {
-    StorageService.closeSession();
+    const gen = ++sessionGenRef.current;
+    sessionRef.current = null;
+    // Send any unsent changes to the cloud, then wipe decrypted data from memory
+    void AutoSyncService.stop().finally(() => {
+      if (sessionGenRef.current === gen) StorageService.closeSession();
+    });
     setCurrentKey(null);
     setCurrentUser(null);
     setVaultItems([]);
@@ -142,6 +153,7 @@ export default function App() {
   const handleUnlocked = async (user: UserProfile, key: CryptoKey) => {
     // Show the "opening vault" screen only while decryption is actually running.
     setUnlockingName(user.displayName || user.username);
+    sessionGenRef.current++;
 
     let items: VaultItem[] = [];
     let userLoans: LoanItem[] = [];
@@ -166,6 +178,25 @@ export default function App() {
     setCurrentKey(key);
     setIsLoadingItems(false);
     setUnlockingName(null);
+
+    // Automatic encrypted cloud backup (on by default)
+    sessionRef.current = { username: user.username, key };
+    AutoSyncService.onRemoteApplied = reloadFromStorage;
+    AutoSyncService.start(user.username, key, AutoSyncService.isEnabledFor(user.settings));
+  };
+
+  /** Reloads what the app shows after newer data was pulled from the cloud. */
+  const reloadFromStorage = async () => {
+    const s = sessionRef.current;
+    if (!s) return;
+    try {
+      const items = await StorageService.loadDecryptedVault(s.username, s.key);
+      setVaultItems(items);
+      setLoans(LoanService.getLoans(s.username));
+      setHostingItems(HostingService.getHostingItems(s.username));
+    } catch (e) {
+      console.error('Failed to reload data after cloud pull:', e);
+    }
   };
 
   // Auto-lock on page visibility change or user inactivity
@@ -420,6 +451,9 @@ export default function App() {
               <span className="hidden sm:inline">مورد جدید</span>
             </button>
 
+            {/* Cloud sync status */}
+            <SyncStatusIndicator onOpen={() => setCurrentView('settings')} />
+
             {/* Alerts Quick Bell */}
             <button
               onClick={() => setCurrentView('alerts')}
@@ -566,7 +600,11 @@ export default function App() {
                 setSettings(newSettings);
                 setCurrentUser((u) => (u ? { ...u, settings: newSettings } : u));
               }}
-              onChangeKey={(newKey) => setCurrentKey(newKey)}
+              onChangeKey={(newKey) => {
+                setCurrentKey(newKey);
+                if (sessionRef.current) sessionRef.current = { ...sessionRef.current, key: newKey };
+                AutoSyncService.setKey(newKey);
+              }}
               onImportVaultItems={handleImportVaultItems}
               onResetVault={handleResetVault}
             />
@@ -688,6 +726,9 @@ export default function App() {
         isOpen={isAutoFillGuideOpen}
         onClose={() => setIsAutoFillGuideOpen(false)}
       />
+
+      {/* Cloud copy newer than this device: let the user choose */}
+      <SyncConflictBanner />
 
       {/* 5. New version available banner (auto-deploy on git push) */}
       <UpdateBanner />

@@ -10,6 +10,7 @@
  *  - on lock, `close()` wipes the cache.
  */
 import { CryptoService } from './crypto';
+import { ChangeBus } from './changeBus';
 
 const ENC_PREFIX = 'enc:v1:';
 const SNAPSHOT_PREFIX = '__keeppass_migration_backup_';
@@ -92,6 +93,7 @@ export class SecureStore {
       return;
     }
     this.cache.set(storageKey, value);
+    if (this.username) ChangeBus.emit(this.username);
     const key = this.key;
     this.writeChain = this.writeChain
       .then(() => this.persist(storageKey, value, key))

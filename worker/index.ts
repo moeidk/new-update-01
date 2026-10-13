@@ -34,6 +34,8 @@ interface VaultRecord {
   encryptedPayload: string;
   schemaVersion: number;
   authHash: string;
+  /** Increments on every successful write; used to stop one device overwriting another's newer data. */
+  revision?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -130,6 +132,7 @@ async function handleVaultStatus(env: Env, rawUsername: string): Promise<Respons
     salt: rec.salt,
     kdfIterations: rec.kdfIterations,
     schemaVersion: rec.schemaVersion,
+    revision: rec.revision ?? 0,
     cloudEnabled: true,
   });
 }
@@ -162,6 +165,7 @@ async function handleVaultPull(request: Request, env: Env): Promise<Response> {
       kdfIterations: rec.kdfIterations,
       encryptedPayload: rec.encryptedPayload,
       schemaVersion: rec.schemaVersion,
+      revision: rec.revision ?? 0,
       updatedAt: rec.updatedAt,
     },
   });
@@ -177,6 +181,10 @@ async function handleVaultSync(request: Request, env: Env): Promise<Response> {
     kdfIterations?: number;
     encryptedPayload?: string;
     schemaVersion?: number;
+    /** Revision this device last saw (null/undefined = never synced). */
+    baseRevision?: number | null;
+    /** Explicit user choice to replace the cloud copy with this device's data. */
+    force?: boolean;
   }>(request);
   if (!body) return fail(413, 'حجم یا قالب داده ارسالی نامعتبر است.');
 
@@ -211,6 +219,24 @@ async function handleVaultSync(request: Request, env: Env): Promise<Response> {
     return fail(403, 'این نام کاربری در فضای ابری متعلق به حساب دیگری است یا رمز عبور آن تغییر کرده است.');
   }
 
+  // Conflict protection: refuse to overwrite a newer cloud copy written by another device.
+  const currentRevision = existing?.revision ?? 0;
+  const baseRevision = typeof body.baseRevision === 'number' ? body.baseRevision : null;
+  // Records written before revisions existed are accepted once from a device that has never
+  // recorded a revision (the common single-device upgrade case).
+  const legacyUpgrade = existing !== null && existing.revision === undefined && baseRevision === null;
+  if (existing && body.force !== true && !legacyUpgrade && baseRevision !== currentRevision) {
+    return json(
+      {
+        error: 'نسخه جدیدتری از دستگاه دیگری در فضای ابری ذخیره شده است.',
+        conflict: true,
+        revision: currentRevision,
+        updatedAt: existing.updatedAt,
+      },
+      409
+    );
+  }
+
   const now = new Date().toISOString();
   const record: VaultRecord = {
     v: 1,
@@ -219,13 +245,14 @@ async function handleVaultSync(request: Request, env: Env): Promise<Response> {
     encryptedPayload,
     schemaVersion: Number(body.schemaVersion) || 3,
     authHash: await sha256Hex(newAuthToken),
+    revision: currentRevision + 1,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
   await env.VAULTS.put(key, JSON.stringify(record));
   if (existing) await clearFailures(env.VAULTS, key);
 
-  return json({ success: true, updatedAt: now });
+  return json({ success: true, updatedAt: now, revision: record.revision });
 }
 
 // ---------------------------------------------------------------------------

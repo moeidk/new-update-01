@@ -45,6 +45,30 @@ function getRecentChanges() {
   }
 }
 
+/**
+ * Version shown in the app: MAJOR.MINOR from package.json, PATCH = number of commits.
+ * Every push therefore gets a new, higher version automatically (2.0.8, 2.0.9, ...).
+ * For a bigger release, bump MAJOR or MINOR in package.json by hand (e.g. "2.1.0").
+ */
+function computeVersion(pkgVersion) {
+  const [major = '1', minor = '0'] = String(pkgVersion).split('.');
+  let build = null;
+  try {
+    const shallow = execSync('git rev-parse --is-shallow-repository', { cwd: rootDir, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+    if (shallow !== 'true') {
+      build = execSync('git rev-list --count HEAD', { cwd: rootDir, stdio: ['ignore', 'pipe', 'ignore'] })
+        .toString()
+        .trim();
+    }
+  } catch {
+    /* not a git checkout */
+  }
+  if (!build) build = process.env.GITHUB_RUN_NUMBER || '0';
+  return `${major}.${minor}.${build}`;
+}
+
 function readPackageVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
@@ -57,7 +81,7 @@ function readPackageVersion() {
 const buildTime = new Date().toISOString();
 const gitCommit = getGitCommit();
 const gitBranch = getGitBranch();
-const pkgVersion = readPackageVersion();
+const pkgVersion = computeVersion(readPackageVersion());
 
 // DEPLOY_ENV is set by the GitHub Actions workflow (production / staging).
 const environment = process.env.DEPLOY_ENV || (process.env.NODE_ENV === 'production' ? 'production' : 'development');

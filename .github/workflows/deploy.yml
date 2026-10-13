@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 20 # recent commit messages become the in-app changelog
+          fetch-depth: 0 # full history: commit count = version build number, messages = changelog
 
       - name: تعیین محیط استقرار
         id: target

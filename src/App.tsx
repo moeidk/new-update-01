@@ -43,6 +43,7 @@ import { IOSAutoFillModal } from './components/IOSAutoFillModal';
 import { DataMigrationService } from './services/dataMigration';
 import { UpdateBanner } from './components/UpdateBanner';
 import { AppVersionFooter } from './components/AppVersionFooter';
+import { UnlockingScreen } from './components/UnlockingScreen';
 
 import { 
   Menu, 
@@ -79,6 +80,7 @@ export default function App() {
   // Vault data (isolated per user)
   const [vaultItems, setVaultItems] = useState<VaultItem[]>([]);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
+  const [unlockingName, setUnlockingName] = useState<string | null>(null);
 
   // Loans data (isolated per user)
   const [loans, setLoans] = useState<LoanItem[]>([]);
@@ -138,36 +140,32 @@ export default function App() {
 
   // Unlock handler
   const handleUnlocked = async (user: UserProfile, key: CryptoKey) => {
-    // 0. Decrypt protected per-user data (loans, hosting, Telegram) into memory
-    //    before any view can read it.
+    // Show the "opening vault" screen only while decryption is actually running.
+    setUnlockingName(user.displayName || user.username);
+
+    let items: VaultItem[] = [];
+    let userLoans: LoanItem[] = [];
+    let userHostings: HostingDomainItem[] = [];
     try {
+      // 0. Decrypt protected per-user data (loans, hosting, Telegram) into memory
+      //    before any view can read it.
       await StorageService.openSession(user.username, key);
-    } catch (e) {
-      console.error('Failed to open secure session:', e);
-    }
-
-    setCurrentUser(user);
-    setSettings(user.settings);
-    setCurrentKey(key);
-    setIsLoadingItems(true);
-
-    try {
-      // 1. Load user isolated vault items
-      const decrypted = await StorageService.loadDecryptedVault(user.username, key);
-      setVaultItems(decrypted);
-
-      // 2. Load user isolated loans
-      const userLoans = LoanService.getLoans(user.username);
-      setLoans(userLoans);
-
-      // 3. Load user isolated hosting and domains
-      const userHostings = HostingService.getHostingItems(user.username);
-      setHostingItems(userHostings);
+      // 1-3. Vault items, loans, hosting & domains (all isolated per user)
+      items = await StorageService.loadDecryptedVault(user.username, key);
+      userLoans = LoanService.getLoans(user.username);
+      userHostings = HostingService.getHostingItems(user.username);
     } catch (e) {
       console.error('Failed to load user data:', e);
-    } finally {
-      setIsLoadingItems(false);
     }
+
+    setVaultItems(items);
+    setLoans(userLoans);
+    setHostingItems(userHostings);
+    setSettings(user.settings);
+    setCurrentUser(user);
+    setCurrentKey(key);
+    setIsLoadingItems(false);
+    setUnlockingName(null);
   };
 
   // Auto-lock on page visibility change or user inactivity
@@ -314,6 +312,7 @@ export default function App() {
     return (
       <>
         <LockScreen onUnlocked={handleUnlocked} />
+        {unlockingName !== null && <UnlockingScreen name={unlockingName} />}
         <UpdateBanner />
       </>
     );

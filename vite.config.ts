@@ -68,6 +68,7 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          globIgnores: ['splash/**'], // iOS launch images are fetched by iOS itself, not precached
           // Never serve the SPA shell for API calls or the version file.
           navigateFallbackDenylist: [/^\/api\//, /^\/version\.json/],
           cleanupOutdatedCaches: true,

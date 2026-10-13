@@ -376,15 +376,18 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
 
   return (
     <div 
-      className="min-h-[100dvh] w-full flex items-center justify-center p-4 bg-[#070A12] relative overflow-y-auto"
+      className="min-h-[100dvh] w-full flex items-center justify-center p-4 bg-[#070A12] relative overflow-y-auto overflow-x-hidden"
       style={{
         paddingTop: 'calc(env(safe-area-inset-top, 0px) + 1.25rem)',
         paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 1.25rem)',
       }}
     >
       {/* Background ambient futuristic glow */}
-      <div className="absolute top-1/4 -right-28 w-96 h-96 bg-[#4F7CFF]/15 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-1/4 -left-28 w-96 h-96 bg-[#8A5CFF]/15 rounded-full blur-3xl pointer-events-none" />
+      {/* Clipped layer so the glows can never widen the page (caused sideways scrolling on iPhone) */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
+        <div className="absolute top-1/4 -right-28 w-96 h-96 bg-[#4F7CFF]/15 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/4 -left-28 w-96 h-96 bg-[#8A5CFF]/15 rounded-full blur-3xl" />
+      </div>
 
       <div 
         className="w-full max-w-md bg-[#121A2C] border border-[#1F2B47] rounded-3xl p-6 sm:p-8 shadow-2xl relative z-10 text-right backdrop-blur-xl transition"
@@ -606,7 +609,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
               {isLoading ? (
                 <>
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  در حال بررسی رمز و بارگذاری پنل...
+                  در حال باز کردن گاوصندوق...
                 </>
               ) : (
                 <>
@@ -625,8 +628,14 @@ export const LockScreen: React.FC<LockScreenProps> = ({ onUnlocked }) => {
                 className="w-full py-2.5 px-4 rounded-xl bg-[#0F1524] hover:bg-[#182239] border border-[#1F2B47] text-[#38E1FF] font-semibold text-xs transition flex items-center justify-center gap-2 cursor-pointer mt-1"
                 style={{ backgroundColor: 'var(--ui-surface-subtle)', borderColor: 'var(--ui-border)' }}
               >
-                {deviceBioInfo.type === 'face-id' ? <Scan className="w-4 h-4" /> : <Fingerprint className="w-4 h-4" />}
-                <span>ورود با {deviceBioInfo.labelFa}</span>
+                {isBioScanning ? (
+                  <span className="w-4 h-4 border-2 border-[#38E1FF] border-t-transparent rounded-full animate-spin" />
+                ) : deviceBioInfo.type === 'face-id' ? (
+                  <Scan className="w-4 h-4" />
+                ) : (
+                  <Fingerprint className="w-4 h-4" />
+                )}
+                <span>{isBioScanning ? 'در حال تأیید هویت...' : `ورود با ${deviceBioInfo.labelFa}`}</span>
               </button>
             )}
             {/* Cloud recovery helper link in login form */}

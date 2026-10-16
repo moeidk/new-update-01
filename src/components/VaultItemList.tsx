@@ -21,10 +21,33 @@ import {
   X,
   Clock,
   Sparkles,
-  ChevronRight
+  ChevronRight,
+  MapPin,
+  QrCode,
+  Link2,
+  History,
 } from 'lucide-react';
 import { VaultItem, ItemCategory } from '../types';
 import { CryptoService } from '../services/crypto';
+import {
+  categoryDef,
+  safeHref,
+  maskCard,
+  formatCardGroups,
+  wifiQrPayload,
+  addressText,
+  monthsUntilExpiry,
+  legacyViews,
+  toForm,
+  platformDef,
+  EMAIL_PROVIDERS,
+  WIFI_SECURITY,
+  EXPIRY_CALENDARS,
+  SSO_PROVIDERS,
+} from '../vault/schema';
+import { gregorianToJalali } from '../utils/jalali';
+import { CATEGORY_ICONS } from './ItemModal';
+import { WifiQrDialog } from './vault/WifiQrDialog';
 
 interface VaultItemListProps {
   items: VaultItem[];
@@ -43,6 +66,7 @@ const CATEGORY_TABS: { id: string; label: string; icon?: React.FC<{ className?: 
   { id: 'email', label: 'ایمیل‌ها', icon: Mail },
   { id: 'wifi', label: 'وای‌فای', icon: Wifi },
   { id: 'note', label: 'یادداشت امن', icon: FileText },
+  { id: 'address', label: 'آدرس‌ها', icon: MapPin },
 ];
 
 export const VaultItemList: React.FC<VaultItemListProps> = ({
@@ -54,7 +78,9 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTab, setSelectedTab] = useState('all');
-  const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
+  // Each secret field is revealed independently (key: `${itemId}:${field}`)
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [qrFor, setQrFor] = useState<{ title: string; payload: string } | null>(null);
   
   // Clipboard Auto-clear Countdown
   const [clipboardNotice, setClipboardNotice] = useState<{
@@ -84,9 +110,9 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
     return () => clearInterval(timer);
   }, [clipboardNotice]);
 
-  const togglePasswordVisibility = (id: string, e: React.MouseEvent) => {
+  const toggleReveal = (key: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setVisiblePasswords((prev) => ({ ...prev, [id]: !prev[id] }));
+    setRevealed((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   const copyToClipboard = async (text: string, label: string, itemTitle: string, id: string, e: React.MouseEvent) => {
@@ -126,7 +152,10 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
       const matchUrl = item.url?.toLowerCase().includes(q) || false;
       const matchCard = item.cardNumber?.replace(/\s/g, '').includes(q.replace(/\s/g, '')) || false;
       const matchTags = item.tags?.some((t) => t.toLowerCase().includes(q)) || false;
-      return matchTitle || matchUsername || matchUrl || matchCard || matchTags;
+      const e = item.extra || {};
+      const matchNew = [e.handle, e.platformOther, platformDef(e.platform)?.label, e.city, e.country]
+        .some((x) => !!x && x.toLowerCase().includes(q));
+      return matchTitle || matchUsername || matchUrl || matchCard || matchTags || matchNew;
     }
 
     return true;
@@ -137,14 +166,300 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
   const weakCount = items.filter((i) => i.password && CryptoService.evaluateStrength(i.password).level === 'weak').length;
   const strongCount = items.filter((i) => i.password && (CryptoService.evaluateStrength(i.password).level === 'strong' || CryptoService.evaluateStrength(i.password).level === 'very-strong')).length;
 
-  const getCategoryIcon = (category: ItemCategory) => {
-    switch (category) {
-      case 'bank': return CreditCard;
-      case 'social': return Globe;
-      case 'email': return Mail;
-      case 'wifi': return Wifi;
-      case 'note': return FileText;
-      default: return KeyRound;
+  const getCategoryIcon = (category: ItemCategory) => CATEGORY_ICONS[category] || KeyRound;
+
+  // ---------------------------------------------------------------- row helpers
+  const rowLabel = (text: string) => (
+    <span className="text-[11px] text-[#94A2C2] shrink-0" style={{ color: 'var(--ui-text-secondary)' }}>{text}</span>
+  );
+
+  const copyBtn = (text: string, label: string, item: VaultItem, key: string) => (
+    <button
+      type="button"
+      onClick={(e) => copyToClipboard(text, label, item.title, key, e)}
+      className="p-1 rounded text-[#94A2C2] hover:text-[#38E1FF] transition cursor-pointer"
+      title={`کپی ${label}`}
+      aria-label={`کپی ${label}`}
+    >
+      {copiedId === key ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+    </button>
+  );
+
+  const textRow = (item: VaultItem, field: string, label: string, value: string | undefined, opts: { ltr?: boolean; copy?: boolean } = {}) =>
+    value ? (
+      <div className="flex items-center justify-between gap-2" key={field}>
+        {rowLabel(`${label}:`)}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className={`text-white text-xs truncate max-w-[190px] ${opts.ltr ? 'font-mono dir-ltr' : ''}`} dir={opts.ltr ? 'ltr' : 'auto'}>
+            {value}
+          </span>
+          {opts.copy !== false && copyBtn(value, label, item, `${field}-${item.id}`)}
+        </div>
+      </div>
+    ) : null;
+
+  const secretRow = (item: VaultItem, field: string, label: string, value: string | undefined, display?: (v: string) => string) => {
+    if (!value) return null;
+    const key = `${item.id}:${field}`;
+    const shown = !!revealed[key];
+    return (
+      <div className="flex items-center justify-between gap-2" key={field}>
+        {rowLabel(`${label}:`)}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="font-mono text-white text-xs dir-ltr truncate max-w-[170px]" dir="ltr">
+            {shown ? (display ? display(value) : value) : '••••••••••••'}
+          </span>
+          <button
+            type="button"
+            onClick={(e) => toggleReveal(key, e)}
+            className="p-1 rounded text-[#94A2C2] hover:text-white transition cursor-pointer"
+            title={shown ? 'پنهان‌سازی' : 'نمایش'}
+            aria-label={shown ? `پنهان کردن ${label}` : `نمایش ${label}`}
+            aria-pressed={shown}
+          >
+            {shown ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+          {copyBtn(value, label, item, `${field}-${item.id}`)}
+        </div>
+      </div>
+    );
+  };
+
+  const linkBtn = (href: string | null, label: string) =>
+    href ? (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="inline-flex items-center gap-1 py-1 px-2 rounded-lg bg-[#4F7CFF]/10 text-[#7FA0FF] hover:bg-[#4F7CFF]/20 text-[11px] font-medium"
+      >
+        <ExternalLink className="w-3 h-3" />
+        {label}
+      </a>
+    ) : null;
+
+  const linkedRow = (item: VaultItem, label: string, linkedId: string | undefined) => {
+    if (!linkedId) return null;
+    const linked = items.find((x) => x.id === linkedId);
+    return (
+      <div className="flex items-center justify-between gap-2" key={`link-${label}`}>
+        {rowLabel(`${label}:`)}
+        {linked ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelectItem(linked);
+            }}
+            className="inline-flex items-center gap-1 text-xs text-[#38E1FF] hover:underline cursor-pointer truncate max-w-[190px]"
+          >
+            <Link2 className="w-3 h-3 shrink-0" />
+            {linked.title}
+          </button>
+        ) : (
+          <span className="text-[11px] text-[#5D6B8F]">پیدا نشد</span>
+        )}
+      </div>
+    );
+  };
+
+  const now = (() => {
+    const d = new Date();
+    const j = gregorianToJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+    return { jy: j.jy, jm: j.jm, gy: d.getFullYear(), gm: d.getMonth() + 1 };
+  })();
+
+  /** Login-style rows shared by «حساب و ورود»، «شبکه‌های اجتماعی» و «ایمیل». */
+  const accountRows = (item: VaultItem, identifierLabel: string) => {
+    const e = item.extra || {};
+    const method = e.loginMethod || 'password';
+    const sso = method === 'sso' ? (e.ssoProvider === 'other' ? e.ssoProviderOther : SSO_PROVIDERS.find((p) => p.value === e.ssoProvider)?.label) : '';
+    return (
+      <>
+        {textRow(item, 'user', identifierLabel, item.username, { ltr: true })}
+        {method === 'password' && secretRow(item, 'pass', 'رمز عبور', item.password)}
+        {method === 'sso' && textRow(item, 'sso', 'ورود با', sso || 'سرویس دیگر', { copy: false })}
+        {method === 'otp' && textRow(item, 'otp', 'روش ورود', 'کد یک‌بارمصرف', { copy: false })}
+        {method === 'sso' && linkedRow(item, 'حساب مرتبط', e.ssoAccountId)}
+      </>
+    );
+  };
+
+  const renderCategoryRows = (item: VaultItem) => {
+    const e = item.extra || {};
+    switch (item.category) {
+      case 'bank': {
+        const key = `${item.id}:card`;
+        const shown = !!revealed[key];
+        const months = item.expireDate ? monthsUntilExpiry(item.expireDate, e.expiryCalendar, now) : null;
+        const cal = EXPIRY_CALENDARS.find((c) => c.value === e.expiryCalendar)?.label || 'تقویم نامشخص';
+        return (
+          <>
+            {item.cardNumber && (
+              <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-[#0F1524] border border-[#1F2B47]" style={{ backgroundColor: 'var(--ui-surface-subtle)', borderColor: 'var(--ui-border)' }}>
+                <span className="font-mono text-xs font-bold text-white tracking-widest" dir="ltr">
+                  {shown ? formatCardGroups(item.cardNumber) : maskCard(item.cardNumber)}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={(ev) => toggleReveal(key, ev)}
+                    className="p-1 rounded text-[#94A2C2] hover:text-white transition cursor-pointer"
+                    aria-label={shown ? 'پنهان کردن شماره کارت' : 'نمایش کامل شماره کارت'}
+                    aria-pressed={shown}
+                    title={shown ? 'پنهان‌سازی' : 'نمایش کامل'}
+                  >
+                    {shown ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                  {copyBtn(item.cardNumber.replace(/\s/g, ''), 'شماره کارت', item, `card-${item.id}`)}
+                </div>
+              </div>
+            )}
+            {textRow(item, 'holder', 'دارنده', item.cardHolder, { copy: true })}
+            {textRow(item, 'issuer', 'بانک', e.issuer, { copy: false })}
+            {item.expireDate && (
+              <div className="flex items-center justify-between gap-2">
+                {rowLabel('انقضا:')}
+                <span className="flex items-center gap-1.5 text-xs text-white">
+                  <span className="font-mono" dir="ltr">{item.expireDate}</span>
+                  <span className="text-[10px] text-[#94A2C2]">({cal})</span>
+                  {months !== null && months < 0 && <span className="px-1.5 py-0.5 rounded-md bg-rose-500/15 text-rose-300 text-[10px] font-bold">منقضی</span>}
+                  {months !== null && months >= 0 && months <= 2 && <span className="px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-bold">نزدیک انقضا</span>}
+                </span>
+              </div>
+            )}
+            {secretRow(item, 'cvv2', 'CVV2', item.cvv2)}
+            {secretRow(item, 'cardPin', 'PIN', e.cardPin)}
+            {linkedRow(item, 'حساب ورود مرتبط', e.bankLoginAccountId)}
+          </>
+        );
+      }
+      case 'social': {
+        const p = platformDef(e.platform);
+        const name = e.platform === 'other' ? e.platformOther : p?.label;
+        return (
+          <>
+            {textRow(item, 'platform', 'پلتفرم', name, { copy: false })}
+            {textRow(item, 'handle', 'شناسه عمومی', e.handle, { ltr: true })}
+            {accountRows(item, 'ورود با')}
+            <div className="flex flex-wrap gap-1.5 pt-1">
+              {linkBtn(safeHref(e.profileUrl), 'باز کردن پروفایل')}
+              {linkBtn(safeHref(item.url), 'صفحه ورود')}
+            </div>
+          </>
+        );
+      }
+      case 'email': {
+        const provider = e.emailProvider === 'other' ? e.emailProviderOther : EMAIL_PROVIDERS.find((x) => x.value === e.emailProvider)?.label;
+        return (
+          <>
+            {accountRows(item, 'ایمیل')}
+            {textRow(item, 'provider', 'سرویس', provider, { copy: false })}
+            <div className="flex flex-wrap gap-1.5 pt-1">{linkBtn(safeHref(item.url), 'باز کردن وب‌میل')}</div>
+          </>
+        );
+      }
+      case 'wifi': {
+        const qr = wifiQrPayload(item);
+        const sec = e.wifiSecurity || 'personal';
+        return (
+          <>
+            {textRow(item, 'ssid', 'نام شبکه', item.username, { ltr: true })}
+            {textRow(item, 'sec', 'امنیت', WIFI_SECURITY.find((x) => x.value === sec)?.label, { copy: false })}
+            {sec === 'enterprise' && textRow(item, 'identity', 'Identity', e.wifiIdentity, { ltr: true })}
+            {sec !== 'open' && secretRow(item, 'pass', 'رمز شبکه', item.password)}
+            {linkedRow(item, 'پنل مودم', e.modemAccountId)}
+            <div className="pt-1">
+              {'payload' in qr ? (
+                <button
+                  type="button"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    setQrFor({ title: item.title, payload: qr.payload });
+                  }}
+                  className="inline-flex items-center gap-1 py-1 px-2 rounded-lg bg-[#4F7CFF]/10 text-[#7FA0FF] hover:bg-[#4F7CFF]/20 text-[11px] font-medium cursor-pointer"
+                >
+                  <QrCode className="w-3 h-3" />
+                  نمایش QR اتصال
+                </button>
+              ) : (
+                <span className="text-[10px] text-[#5D6B8F]">{qr.unsupported}</span>
+              )}
+            </div>
+          </>
+        );
+      }
+      case 'note': {
+        if (!item.notes) return null;
+        const key = `${item.id}:note`;
+        const shown = !!revealed[key];
+        return (
+          <div className="space-y-1.5">
+            <p className="text-xs text-[#94A2C2] leading-relaxed whitespace-pre-wrap break-words" style={{ color: shown ? 'var(--ui-text)' : 'var(--ui-text-secondary)' }} dir="auto">
+              {shown ? item.notes : 'متن یادداشت مخفی است.'}
+            </p>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={(ev) => toggleReveal(key, ev)}
+                className="inline-flex items-center gap-1 py-1 px-2 rounded-lg bg-white/5 text-[#C9D3EA] hover:bg-white/10 text-[11px] cursor-pointer"
+                aria-pressed={shown}
+              >
+                {shown ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                {shown ? 'پنهان کردن متن' : 'مشاهده متن'}
+              </button>
+              {copyBtn(item.notes, 'متن یادداشت', item, `note-${item.id}`)}
+            </div>
+          </div>
+        );
+      }
+      case 'address': {
+        const plain = addressText(item, false);
+        const withContact = addressText(item, true);
+        return (
+          <>
+            {textRow(item, 'place', 'شهر', [e.city, e.country].filter(Boolean).join('، '), { copy: false })}
+            {e.fullAddress && (
+              <p className="text-xs text-white leading-relaxed whitespace-pre-wrap break-words" dir="auto">
+                {e.fullAddress}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <button
+                type="button"
+                onClick={(ev) => copyToClipboard(plain, 'آدرس', item.title, `addr-${item.id}`, ev)}
+                className="inline-flex items-center gap-1 py-1 px-2 rounded-lg bg-[#4F7CFF]/10 text-[#7FA0FF] hover:bg-[#4F7CFF]/20 text-[11px] font-medium cursor-pointer"
+              >
+                {copiedId === `addr-${item.id}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                کپی آدرس کامل
+              </button>
+              {withContact !== plain && (
+                <button
+                  type="button"
+                  onClick={(ev) => copyToClipboard(withContact, 'آدرس با گیرنده', item.title, `addr2-${item.id}`, ev)}
+                  className="inline-flex items-center gap-1 py-1 px-2 rounded-lg bg-white/5 text-[#C9D3EA] hover:bg-white/10 text-[11px] cursor-pointer"
+                >
+                  {copiedId === `addr2-${item.id}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                  کپی با نام گیرنده و تماس
+                </button>
+              )}
+            </div>
+          </>
+        );
+      }
+      default:
+        return (
+          <>
+            {accountRows(item, 'شناسه ورود')}
+            <div className="flex flex-wrap gap-1.5 pt-1">
+              {linkBtn(safeHref(item.url), 'باز کردن صفحه ورود')}
+              {(item.urls || []).map((u, i) => (
+                <React.Fragment key={i}>{linkBtn(safeHref(u), `آدرس ${i + 2}`)}</React.Fragment>
+              ))}
+            </div>
+          </>
+        );
     }
   };
 
@@ -301,8 +616,11 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           {filteredItems.map((item) => {
             const CatIcon = getCategoryIcon(item.category);
-            const isPasswordVisible = visiblePasswords[item.id] || false;
-            const passStrength = item.password ? CryptoService.evaluateStrength(item.password) : null;
+            const usesPassword =
+              (['login', 'social', 'email'].includes(item.category) && (item.extra?.loginMethod || 'password') === 'password') ||
+              (item.category === 'wifi' && (item.extra?.wifiSecurity || 'personal') !== 'open');
+            const passStrength = item.password && usesPassword ? CryptoService.evaluateStrength(item.password) : null;
+            const legacyCount = legacyViews(toForm(item), item).length;
 
             return (
               <div
@@ -326,14 +644,10 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
                         {item.isFavorite && <Star className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />}
                       </h4>
                       <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-[11px] text-[#94A2C2]" style={{ color: 'var(--ui-text-secondary)' }}>
-                          {item.category === 'bank' ? 'کارت بانکی' :
-                           item.category === 'social' ? 'شبکه اجتماعی' :
-                           item.category === 'email' ? 'ایمیل' :
-                           item.category === 'wifi' ? 'وای‌فای' :
-                           item.category === 'note' ? 'یادداشت' : 'ورود'}
+                        <span className="text-[11px] text-[#94A2C2] whitespace-nowrap" style={{ color: 'var(--ui-text-secondary)' }}>
+                          {categoryDef(item.category).label}
                         </span>
-                        {item.url && (
+                        {item.url && (item.category === 'login' || item.category === 'social' || item.category === 'email') && (
                           <span className="text-[10px] text-[#5D6B8F] truncate max-w-[140px] dir-ltr text-left">
                             {item.url.replace(/^https?:\/\//, '')}
                           </span>
@@ -371,76 +685,12 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
 
                 {/* Content Rows */}
                 <div className="mt-3.5 pt-3 border-t border-[#1F2B47]/70 space-y-2 text-xs" style={{ borderColor: 'var(--ui-border)' }}>
-                  {/* Bank Card Number Row */}
-                  {item.category === 'bank' && item.cardNumber && (
-                    <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-[#0F1524] border border-[#1F2B47]" style={{ backgroundColor: 'var(--ui-surface-subtle)', borderColor: 'var(--ui-border)' }}>
-                      <span className="font-mono text-xs font-bold text-white tracking-widest dir-ltr">
-                        {item.cardNumber}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => copyToClipboard(item.cardNumber!.replace(/\s/g, ''), 'شماره کارت', item.title, `card-${item.id}`, e)}
-                        className="p-1 rounded text-[#94A2C2] hover:text-[#38E1FF] transition cursor-pointer"
-                        title="کپی شماره کارت"
-                      >
-                        {copiedId === `card-${item.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      </button>
+                  {renderCategoryRows(item)}
+                  {legacyCount > 0 && (
+                    <div className="flex items-center gap-1 text-[10px] text-amber-300/90 pt-0.5">
+                      <History className="w-3 h-3" />
+                      {legacyCount} مورد در «اطلاعات قبلی» — برای مشاهده، مورد را باز کنید
                     </div>
-                  )}
-
-                  {/* Username Row */}
-                  {item.username && (
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-[#94A2C2]" style={{ color: 'var(--ui-text-secondary)' }}>نام کاربری:</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-white text-xs dir-ltr select-all truncate max-w-[170px]">
-                          {item.username}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(e) => copyToClipboard(item.username!, 'نام کاربری', item.title, `user-${item.id}`, e)}
-                          className="p-1 rounded text-[#94A2C2] hover:text-[#38E1FF] transition cursor-pointer"
-                          title="کپی نام کاربری"
-                        >
-                          {copiedId === `user-${item.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Password Row */}
-                  {item.password && (
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-[#94A2C2]" style={{ color: 'var(--ui-text-secondary)' }}>رمز عبور:</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-white text-xs dir-ltr select-all">
-                          {isPasswordVisible ? item.password : '••••••••••••'}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(e) => togglePasswordVisibility(item.id, e)}
-                          className="p-1 rounded text-[#94A2C2] hover:text-white transition cursor-pointer"
-                          title={isPasswordVisible ? 'پنهان‌سازی' : 'نمایش'}
-                        >
-                          {isPasswordVisible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => copyToClipboard(item.password!, 'رمز عبور', item.title, `pass-${item.id}`, e)}
-                          className="p-1 rounded text-[#94A2C2] hover:text-[#38E1FF] transition cursor-pointer"
-                          title="کپی رمز عبور"
-                        >
-                          {copiedId === `pass-${item.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Note preview */}
-                  {item.category === 'note' && item.notes && (
-                    <p className="text-xs text-[#94A2C2] line-clamp-2 leading-relaxed" style={{ color: 'var(--ui-text-secondary)' }}>
-                      {item.notes}
-                    </p>
                   )}
                 </div>
 
@@ -467,6 +717,8 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
           })}
         </div>
       )}
+
+      {qrFor && <WifiQrDialog title={qrFor.title} payload={qrFor.payload} onClose={() => setQrFor(null)} />}
 
       {/* Floating "+" button: always visible (above the mobile bottom bar, and on desktop) */}
       <button

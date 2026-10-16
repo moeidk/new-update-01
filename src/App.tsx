@@ -269,40 +269,31 @@ export default function App() {
   };
 
   // Vault item actions
-  const handleSaveVaultItem = async (itemData: Partial<VaultItem>) => {
+  const handleSaveVaultItem = async (record: VaultItem) => {
     if (!currentKey || !currentUser) return;
     const now = new Date().toISOString();
+    const existing = record.id ? vaultItems.find((it) => it.id === record.id) : undefined;
     let updatedItems: VaultItem[];
 
-    const isExisting = !!itemData.id && vaultItems.some((it) => it.id === itemData.id);
-    if (isExisting) {
-      updatedItems = vaultItems.map((it) =>
-        it.id === itemData.id ? ({ ...it, ...itemData, updatedAt: now } as VaultItem) : it
-      );
+    if (existing) {
+      // The form starts from the stored record, so unknown/new fields are preserved.
+      const saved: VaultItem = { ...record, id: existing.id, createdAt: existing.createdAt, updatedAt: now };
+      updatedItems = vaultItems.map((it) => (it.id === existing.id ? saved : it));
     } else {
-      const newItem: VaultItem = {
+      const saved: VaultItem = {
+        ...record,
         id: `item-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
-        title: itemData.title || 'بدون عنوان',
-        category: itemData.category || 'login',
-        username: itemData.username,
-        password: itemData.password,
-        url: itemData.url,
-        notes: itemData.notes,
-        cardNumber: itemData.cardNumber,
-        cardHolder: itemData.cardHolder,
-        cvv2: itemData.cvv2,
-        expireDate: itemData.expireDate,
-        pin: itemData.pin,
-        isFavorite: itemData.isFavorite ?? false,
-        tags: itemData.tags || [],
+        title: record.title || 'بدون عنوان',
+        category: record.category || 'login',
+        isFavorite: record.isFavorite ?? false,
         createdAt: now,
         updatedAt: now,
       };
-      updatedItems = [newItem, ...vaultItems];
+      updatedItems = [saved, ...vaultItems];
     }
 
-    setVaultItems(updatedItems);
     await StorageService.saveEncryptedVault(currentUser.username, updatedItems, currentKey);
+    setVaultItems(updatedItems);
     setIsItemModalOpen(false);
   };
 
@@ -704,6 +695,7 @@ export default function App() {
         isOpen={isItemModalOpen}
         item={selectedVaultItem}
         defaultCategory={addItemCategory}
+        allItems={vaultItems}
         onClose={() => setIsItemModalOpen(false)}
         onSave={handleSaveVaultItem}
         onDelete={handleDeleteVaultItem}

@@ -1,10 +1,32 @@
+// Internal ids are stable; display names live in src/vault/schema.ts.
 export type ItemCategory = 
   | 'login' 
   | 'bank' 
   | 'social' 
   | 'email' 
   | 'note' 
-  | 'wifi';
+  | 'wifi'
+  | 'address';
+
+export type CustomFieldType = 'text' | 'secret' | 'url' | 'date' | 'multiline';
+
+export interface VaultCustomField {
+  id: string;
+  label: string;
+  type: CustomFieldType;
+  value: string;
+}
+
+/** A value kept from an older format or from a category the item no longer uses. */
+export interface VaultLegacyEntry {
+  id: string;
+  label: string;
+  value: string;
+  secret: boolean;
+  /** Category (or 'v1') the value originally belonged to. */
+  from: string;
+  savedAt: string;
+}
 
 export interface VaultItem {
   id: string;
@@ -19,7 +41,16 @@ export interface VaultItem {
   cardHolder?: string;
   cvv2?: string;
   expireDate?: string;
+  /** LEGACY ("رمز دوم / پین" combined field). Never written by the new form; shown under «اطلاعات قبلی». */
   pin?: string;
+  // Form v2 (all stored inside the encrypted vault blob)
+  /** Category-specific fields, keyed by field id (see src/vault/schema.ts). */
+  extra?: Record<string, string>;
+  /** Additional login URLs; `url` keeps the first one for compatibility. */
+  urls?: string[];
+  customFields?: VaultCustomField[];
+  legacy?: VaultLegacyEntry[];
+  formVersion?: number;
   // Meta
   isFavorite: boolean;
   tags?: string[];

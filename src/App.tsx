@@ -610,7 +610,7 @@ export default function App() {
             />
           )}
 
-          <AppVersionFooter className="mt-10 pt-4 border-t border-[#1F2B47]/50" />
+          <AppVersionFooter className={`mt-10 pt-4 border-t border-[#1F2B47]/50 ${currentView === 'vault' ? 'pb-20 lg:pb-0' : ''}`} />
         </main>
 
         {/* Mobile Bottom Navigation Bar (Docked to iOS Home Indicator with Safe Area) */}

@@ -468,17 +468,16 @@ export const VaultItemList: React.FC<VaultItemListProps> = ({
         </div>
       )}
 
-      {/* Floating Bottom Add button for Mobile */}
-      <div className="fixed bottom-6 left-6 z-20 sm:hidden">
-        <button
-          type="button"
-          onClick={() => onAddNew()}
-          className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#4F7CFF] to-[#8A5CFF] text-white shadow-2xl shadow-[#4F7CFF]/50 flex items-center justify-center cursor-pointer active:scale-95 transition"
-          aria-label="افزودن رمز جدید"
-        >
-          <Plus className="w-7 h-7" />
-        </button>
-      </div>
+      {/* Floating "+" button: always visible (above the mobile bottom bar, and on desktop) */}
+      <button
+        type="button"
+        onClick={() => onAddNew()}
+        className="fixed z-30 left-4 lg:left-8 bottom-[calc(env(safe-area-inset-bottom,0px)+5.25rem)] lg:bottom-8 w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#4F7CFF] to-[#8A5CFF] text-white shadow-2xl shadow-[#4F7CFF]/50 flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 transition ring-4 ring-[#070A12]"
+        aria-label="افزودن رمز جدید"
+        title="افزودن رمز جدید"
+      >
+        <Plus className="w-7 h-7" strokeWidth={2.5} />
+      </button>
     </div>
   );
 };
